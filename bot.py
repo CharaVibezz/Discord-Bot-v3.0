@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import json
 import os
+import asyncio
 
 
 # Load bot token from Railway Variables
@@ -15,13 +16,12 @@ if TOKEN is None:
 TARGET_CHANNEL_ID = 1525220657560817766
 
 
-# Roles that are allowed to send messages in the channel
-# Change these names to match your server roles
+# Roles that are allowed to bypass the punishment system
 STAFF_ROLES = [
-    "------The CEO's------",
-    "-------The Big 3-------",
-    "---------Staff---------",
-    "------Bots/Apps------"
+    "Moderator",
+    "Staff",
+    "Admin",
+    "Helper"
 ]
 
 
@@ -66,6 +66,34 @@ async def on_ready():
     print("----------------------------")
 
 
+# Fake ban command
+@bot.command()
+async def fakeban(ctx, member: discord.Member = None):
+
+    if member is None:
+        await ctx.send("❌ Please mention a user to fake ban.")
+        return
+
+    processing_msg = await ctx.send(
+        f"🔨 Processing ban for {member.mention}..."
+    )
+
+    await asyncio.sleep(3)
+
+    await processing_msg.edit(
+        content=(
+            f"🔨 {member.mention} has been banned!\n"
+            "Reason: Breaking the rules."
+        )
+    )
+
+    await processing_msg.delete(delay=10)
+
+    print(
+        f"{ctx.author} used fakeban on {member}"
+    )
+
+
 @bot.event
 async def on_message(message):
 
@@ -76,6 +104,7 @@ async def on_message(message):
 
     # Ignore staff roles
     if any(role.name in STAFF_ROLES for role in message.author.roles):
+        await bot.process_commands(message)
         return
 
 
@@ -88,6 +117,7 @@ async def on_message(message):
         # Delete user's message
         try:
             await message.delete()
+
         except discord.Forbidden:
             print("Cannot delete message. Missing permissions.")
 
@@ -104,7 +134,6 @@ async def on_message(message):
                 "Your next message here will result in a ban."
             )
 
-            # Delete bot warning after 10 seconds
             await warning_msg.delete(delay=10)
 
             return
@@ -123,7 +152,6 @@ async def on_message(message):
                 f"{message.author.mention} has been banned."
             )
 
-            # Delete bot ban message after 10 seconds
             await ban_msg.delete(delay=10)
 
             print(
@@ -134,8 +162,7 @@ async def on_message(message):
         except discord.Forbidden:
             print(
                 "Cannot ban user. "
-                "Check that the bot has Ban Members permission "
-                "and its role is above the user."
+                "Check bot permissions and role position."
             )
 
 
@@ -143,6 +170,7 @@ async def on_message(message):
             print(f"Ban error: {e}")
 
 
+    # Allows commands like !fakeban to work
     await bot.process_commands(message)
 
 
