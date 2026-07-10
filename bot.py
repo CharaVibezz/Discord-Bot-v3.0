@@ -15,6 +15,16 @@ if TOKEN is None:
 TARGET_CHANNEL_ID = 1525220657560817766
 
 
+# Roles that are allowed to send messages in the channel
+# Change these names to match your server roles
+STAFF_ROLES = [
+    "------The CEO's------",
+    "-------The Big 3-------",
+    "---------Staff---------",
+    "------Bots/Apps------"
+]
+
+
 WARNING_FILE = "warnings.json"
 
 
@@ -64,13 +74,18 @@ async def on_message(message):
         return
 
 
+    # Ignore staff roles
+    if any(role.name in STAFF_ROLES for role in message.author.roles):
+        return
+
+
     # Check restricted channel
     if message.channel.id == TARGET_CHANNEL_ID:
 
         user_id = str(message.author.id)
 
 
-        # Delete the user's message
+        # Delete user's message
         try:
             await message.delete()
         except discord.Forbidden:
