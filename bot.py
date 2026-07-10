@@ -24,27 +24,25 @@ if TOKEN is None:
 TARGET_CHANNEL_ID = 1525220657560817766
 
 
-# Staff roles that bypass the restricted channel punishment
-# Use role names
+# Staff roles that bypass restricted channel punishment
+# Replace with your actual role IDs
 STAFF_ROLES = [
-    "------The CEO's------",
-    "-------The Big 3-------",
-    "---------Staff---------",
-    "------Bots/Apps------"
+    1478214213292785825,
+    1478212575908073482,
+    1478212776588607670,
 ]
 
 
 # Roles allowed to use !fakeban
-# Use role IDs
+# Replace with your actual role IDs
 FAKEBAN_ALLOWED_ROLES = [
     1478214213292785825,
     1478212575908073482,
     1478212776588607670,
-    1478127021828604075,
+    1478127021828604075
 ]
 
 
-# Warning storage
 WARNING_FILE = "warnings.json"
 
 
@@ -112,33 +110,55 @@ async def on_ready():
 @bot.command()
 async def fakeban(ctx, member: discord.Member = None):
 
-    # Check role permission
+
+    # Check fakeban role permission
     allowed = any(
         role.id in FAKEBAN_ALLOWED_ROLES
         for role in ctx.author.roles
     )
 
+
     if not allowed:
+
         msg = await ctx.send(
             f"{ctx.author.mention} ❌ You cannot use this command."
         )
 
         await msg.delete(delay=5)
+
         return
 
 
+
     if member is None:
+
         msg = await ctx.send(
             "❌ Please mention someone to fake ban."
         )
 
         await msg.delete(delay=5)
+
         return
+
+
+
+    # Prevent fake banning administrators
+    if member.guild_permissions.administrator:
+
+        msg = await ctx.send(
+            "❌ You cannot fakeban an administrator."
+        )
+
+        await msg.delete(delay=5)
+
+        return
+
 
 
     countdown = await ctx.send(
         f"🔨 Preparing ban for {member.mention}..."
     )
+
 
 
     # Countdown from 5
@@ -154,38 +174,58 @@ async def fakeban(ctx, member: discord.Member = None):
         await asyncio.sleep(1)
 
 
-    # Send DM prank message
+
+    # Send fake ban DM
     try:
+
         await member.send(
             "You've been BANNED!! 🤯🪦 (joke)"
         )
 
     except discord.Forbidden:
+
         print(
-            f"Could not DM {member}. Their DMs may be closed."
+            f"Could not DM {member}. DMs are closed."
         )
+
+    except discord.HTTPException:
+
+        print(
+            "Discord error while sending fakeban DM."
+        )
+
 
 
     # Timeout user for 10 seconds
     try:
+
         await member.timeout(
-            discord.utils.utcnow() + timedelta(seconds=10),
+            timedelta(seconds=10),
             reason="Fake ban prank"
         )
 
+
     except discord.Forbidden:
+
         print(
             "Cannot timeout user. "
-            "Check Moderate Members permission."
+            "Check Moderate Members permission and role order."
         )
+
+
+    except discord.HTTPException:
+
+        print(
+            "Discord error while timing out user."
+        )
+
 
 
     # Fake ban result
     await countdown.edit(
         content=(
-            f"🔨 {member.mention} has been banned!\n"
+            f"🔨 {member.mention} has been banned.\n"
             "Reason: Breaking the rules.\n"
-            "*(Just kidding 😎)*"
         )
     )
 
@@ -214,16 +254,23 @@ async def on_message(message):
 
 
 
-    # Allow commands to work
+    # Process commands first
 
     await bot.process_commands(message)
+
+
+
+    # Prevent commands triggering channel punishment
+
+    if message.content.startswith("!"):
+        return
 
 
 
     # Ignore staff
 
     if any(
-        role.name in STAFF_ROLES
+        role.id in STAFF_ROLES
         for role in message.author.roles
     ):
 
@@ -231,7 +278,7 @@ async def on_message(message):
 
 
 
-    # Check restricted channel
+    # Only check restricted channel
 
     if message.channel.id != TARGET_CHANNEL_ID:
 
@@ -243,7 +290,7 @@ async def on_message(message):
 
 
 
-    # Delete user message
+    # Delete message
 
     try:
 
@@ -252,7 +299,7 @@ async def on_message(message):
     except discord.Forbidden:
 
         print(
-            "Missing Manage Messages permission"
+            "Missing Manage Messages permission."
         )
 
 
@@ -314,10 +361,9 @@ async def on_message(message):
 
     except discord.Forbidden:
 
-
         print(
             "Cannot ban user. "
-            "Check bot role position and permissions."
+            "Check Ban Members permission and role order."
         )
 
 
