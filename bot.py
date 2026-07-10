@@ -1,3 +1,4 @@
+from datetime import timedelta
 import discord
 from discord.ext import commands
 import json
@@ -111,37 +112,28 @@ async def on_ready():
 @bot.command()
 async def fakeban(ctx, member: discord.Member = None):
 
-
     # Check role permission
-
     allowed = any(
         role.id in FAKEBAN_ALLOWED_ROLES
         for role in ctx.author.roles
     )
 
-
     if not allowed:
-
         msg = await ctx.send(
             f"{ctx.author.mention} ❌ You cannot use this command."
         )
 
         await msg.delete(delay=5)
-
         return
 
 
-
     if member is None:
-
         msg = await ctx.send(
             "❌ Please mention someone to fake ban."
         )
 
         await msg.delete(delay=5)
-
         return
-
 
 
     countdown = await ctx.send(
@@ -149,6 +141,7 @@ async def fakeban(ctx, member: discord.Member = None):
     )
 
 
+    # Countdown from 5
     for number in range(5, 0, -1):
 
         await countdown.edit(
@@ -161,11 +154,38 @@ async def fakeban(ctx, member: discord.Member = None):
         await asyncio.sleep(1)
 
 
+    # Send DM prank message
+    try:
+        await member.send(
+            "You've been BANNED!! 🤯🪦 (joke)"
+        )
 
+    except discord.Forbidden:
+        print(
+            f"Could not DM {member}. Their DMs may be closed."
+        )
+
+
+    # Timeout user for 10 seconds
+    try:
+        await member.timeout(
+            discord.utils.utcnow() + timedelta(seconds=10),
+            reason="Fake ban prank"
+        )
+
+    except discord.Forbidden:
+        print(
+            "Cannot timeout user. "
+            "Check Moderate Members permission."
+        )
+
+
+    # Fake ban result
     await countdown.edit(
         content=(
             f"🔨 {member.mention} has been banned!\n"
-            "Reason: Breaking the rules."
+            "Reason: Breaking the rules.\n"
+            "*(Just kidding 😎)*"
         )
     )
 
