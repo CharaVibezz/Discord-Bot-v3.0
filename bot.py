@@ -3,7 +3,7 @@ import json
 import os
 import random
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Tuple, Any
 from pathlib import Path
 
@@ -27,9 +27,9 @@ class Config:
     DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
     DATA_DIR.mkdir(exist_ok=True)
     
-    # Channel IDs
+    # Channel IDs - UPDATE THESE WITH CORRECT IDs!
     TARGET_CHANNEL_ID = 1525220657560817766
-    LOG_CHANNEL_ID = 1525220657560817767
+    LOG_CHANNEL_ID = 1525377874868305940  # ← THIS IS THE PROBLEM
     LEVEL_UP_CHANNEL_ID = 1525392046989246525
     
     # Role IDs
@@ -214,7 +214,7 @@ class XPSystem:
             levels[user_id] = {"xp": 0, "last_message_time": None}
         
         entry = levels[user_id]
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         
         # Check cooldown
         if entry.get("last_message_time"):
@@ -310,7 +310,7 @@ class LoggingService:
         embed = discord.Embed(
             description=description,
             color=color,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             **embed_kwargs
         )
         
@@ -475,7 +475,7 @@ class ModBot(commands.Bot):
             # Ensure bot is ready before running
             await self.wait_until_ready()
             
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             active_users = set()
             
             for guild in self.guilds:
@@ -547,7 +547,7 @@ async def on_message(message: discord.Message):
 async def handle_forbidden_message(message: discord.Message):
     """Handle messages in restricted channel"""
     user_id = str(message.author.id)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     
     # Delete the message
     try:
@@ -625,7 +625,7 @@ async def on_voice_state_update(
     before_counts = before.channel and before.channel != afk_channel
     after_counts = after.channel and after.channel != afk_channel
     
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     
     if after_counts and not before_counts:
         # Joined a voice channel
@@ -978,7 +978,7 @@ async def daily(interaction: discord.Interaction):
         levels[user_id] = {"xp": 0, "last_message_time": None}
     
     entry = levels[user_id]
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     today = now.date().isoformat()
     
     if entry.get("last_daily_bonus") == today:
