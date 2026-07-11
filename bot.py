@@ -18,14 +18,16 @@ from discord.ext import commands, tasks
 class Config:
     """Centralized configuration with validation"""
     
+    # Bot Token
     TOKEN = os.getenv("TOKEN")
     if not TOKEN:
         raise ValueError("Missing TOKEN environment variable")
     
+    # Data Directory
     DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
     DATA_DIR.mkdir(exist_ok=True)
     
-    # Channel IDs – UPDATE THESE!
+    # Channel IDs - UPDATE THESE WITH CORRECT IDs!
     TARGET_CHANNEL_ID = 1525220657560817766
     LOG_CHANNEL_ID = 1525377874868305940
     LEVEL_UP_CHANNEL_ID = 1525392046989246525
@@ -36,83 +38,106 @@ class Config:
         1478212575908073482,
         1478212776588607670,
     }
+    
     FAKEBAN_ALLOWED_ROLES = STAFF_ROLES | {1478127021828604075}
+
+    # Separate, deliberately not reusing FAKEBAN_ALLOWED_ROLES — this command has a
+    # bigger blast radius than a prank timeout. Left empty on purpose: an empty
+    # whitelist means the command is inert until someone explicitly staffs it.
     SELFDESTRUCT_ALLOWED_ROLES = {
         1478210342524944447,
         1478238526330900552
     }
-    
+
+    # role sync: anyone holding VERIFIED_ROLE_ID has UNVERIFIED_ROLE_ID stripped
     VERIFIED_ROLE_ID = 1478213211307380838
     UNVERIFIED_ROLE_ID = 1478213220408889384
     
-    # XP Settings – NO CAPS
+    # XP Settings — level curve: xp_for_level(n) = LEVEL_A*n^2 + LEVEL_B*n + LEVEL_C
     LEVEL_A = 35
     LEVEL_B = 120
     LEVEL_C = 200
-    
-    VOICE_RATE_OPTIMAL = 20
-    VOICE_RATE_MODERATE = 12
-    VOICE_RATE_MINIMAL = 6
+
+    # Message XP — tiered by length, plus small quality bonuses
+    MESSAGE_XP_SHORT = (10, 20)      # content < 10 chars
+    MESSAGE_XP_MEDIUM = (25, 35)     # content 10-49 chars
+    MESSAGE_XP_LONG = (35, 50)       # content 50+ chars
+    MESSAGE_XP_COOLDOWN_SECONDS = 30
+    QUALITY_BONUS_LONG_MESSAGE = 5   # 20+ words
+    QUALITY_BONUS_LINK = 3           # contains a link
+    QUALITY_BONUS_REPLY = 2          # is a reply
+
+    DAILY_BONUS_XP = 20
+
+    # Voice XP — tiered rate, resets every join/leave (same behavior as the old
+    # ramp model). a short-hop farmer just keeps re-collecting the top tier, so
+    # VOICE_XP_COOLDOWN_SECONDS below is what actually stops that, not this curve.
+    VOICE_RATE_OPTIMAL = 20     # xp/min, first 30 min
+    VOICE_RATE_MODERATE = 12    # xp/min, next 30 min (30-60)
+    VOICE_RATE_MINIMAL = 6      # xp/min, everything past 60 min
     VOICE_MINIMUM_MINUTES = 1
+    # per-user cooldown between paid voice sessions. in-memory only — resets on
+    # restart — but that's fine, its job is stopping rapid join/leave cycling
+    # within a single runtime, not surviving deploys.
     VOICE_XP_COOLDOWN_SECONDS = 300
-    
-    ACTIVITY_BONUS = 25
+    # flat bonus for sessions that clear 60 min, doubled past 90 min
+    CONTENT_CREATOR_BONUS = 30
+
+    # Streak bonus — consecutive days (ending today) with 50+ voice XP
+    STREAK_THRESHOLD = 3
     STREAK_BONUS_PER_DAY = 5
     STREAK_BONUS_MAX = 50
-    STREAK_THRESHOLD = 3
-    CONTENT_CREATOR_BONUS = 30
-    
-    MESSAGE_XP_SHORT = (10, 20)
-    MESSAGE_XP_MEDIUM = (25, 35)
-    MESSAGE_XP_LONG = (35, 50)
-    MESSAGE_XP_COOLDOWN_SECONDS = 30
-    
-    # Special events – date -> multiplier
-    DOUBLE_XP_EVENTS = {}
-    
+
+    # date (YYYY-MM-DD, UTC) -> multiplier. set via /doublexp, persisted to
+    # data/config.json so it survives restarts.
+    DOUBLE_XP_EVENTS: Dict[str, float] = {}
+
+    # if True, every voice XP award posts a breakdown embed to LOG_CHANNEL_ID.
+    # useful while you're debugging XP totals, noisy in a busy server long-term —
+    # turn it off once you trust the numbers again.
     VOICE_XP_DETAILED_LOGGING = True
+    
+    # Warning Settings
     WARNING_EXPIRY_DAYS = 30
     
+    # File paths
     WARNING_FILE = DATA_DIR / "warnings.json"
     LEVELS_FILE = DATA_DIR / "levels.json"
     VOICE_SESSIONS_FILE = DATA_DIR / "voice_sessions.json"
     
+    # Logging
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     
     @classmethod
     def validate(cls, guild: discord.Guild) -> List[str]:
+        """Validate all configuration settings"""
         errors = []
-        for cid in (cls.LOG_CHANNEL_ID, cls.TARGET_CHANNEL_ID, cls.LEVEL_UP_CHANNEL_ID):
-            if not guild.get_channel(cid):
-                errors.append(f"Channel {cid} not found")
-        for rid in cls.STAFF_ROLES:
-            if not guild.get_role(rid):
-                errors.append(f"Staff role {rid} not found")
+        
+        # Check channels
+        log_channel = guild.get_channel(cls.LOG_CHANNEL_ID)
+        if not log_channel:
+            errors.append(f"Log channel {cls.LOG_CHANNEL_ID} not found")
+        
+        target_channel = guild.get_channel(cls.TARGET_CHANNEL_ID)
+        if not target_channel:
+            errors.append(f"Target channel {cls.TARGET_CHANNEL_ID} not found")
+        
+        level_channel = guild.get_channel(cls.LEVEL_UP_CHANNEL_ID)
+        if not level_channel:
+            errors.append(f"Level up channel {cls.LEVEL_UP_CHANNEL_ID} not found")
+        
+        # Check roles
+        for role_id in cls.STAFF_ROLES:
+            if not guild.get_role(role_id):
+                errors.append(f"Staff role {role_id} not found")
+        
         return errors
-    
+
     @classmethod
     def is_double_xp(cls) -> float:
+        """Multiplier for today, UTC. 1.0 unless a /doublexp event is set."""
         today = datetime.now(timezone.utc).date().isoformat()
         return cls.DOUBLE_XP_EVENTS.get(today, 1.0)
-    
-    @classmethod
-    def get_all_events(cls) -> Dict[str, float]:
-        return dict(sorted(cls.DOUBLE_XP_EVENTS.items()))
-    
-    @classmethod
-    def add_event(cls, date: str, multiplier: float):
-        cls.DOUBLE_XP_EVENTS[date] = multiplier
-    
-    @classmethod
-    def remove_event(cls, date: str) -> bool:
-        if date in cls.DOUBLE_XP_EVENTS:
-            del cls.DOUBLE_XP_EVENTS[date]
-            return True
-        return False
-    
-    @classmethod
-    def clear_events(cls):
-        cls.DOUBLE_XP_EVENTS.clear()
 
 # ==========================
 # Logging Setup
@@ -133,15 +158,19 @@ logger = logging.getLogger(__name__)
 # ==========================
 
 class DataManager:
+    """Thread-safe data management with automatic backups"""
+    
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
         self._cache: Dict[str, Any] = {}
         self._lock = asyncio.Lock()
     
     async def load(self, filename: str, default: Any = None) -> Any:
+        """Load data from file with caching"""
         async with self._lock:
             if filename in self._cache:
                 return self._cache[filename]
+            
             filepath = self.data_dir / filename
             try:
                 with open(filepath, 'r') as f:
@@ -149,21 +178,26 @@ class DataManager:
             except (FileNotFoundError, json.JSONDecodeError):
                 data = default or {}
                 if filepath.exists():
+                    # Create backup of corrupted file
                     backup = filepath.with_suffix('.json.bak')
                     filepath.rename(backup)
                     logger.warning(f"Corrupted {filename} backed up to {backup}")
                 self._save_sync(filename, data)
+            
             self._cache[filename] = data
             return data
     
     async def save(self, filename: str, data: Any):
+        """Save data to file and update cache"""
         async with self._lock:
             self._cache[filename] = data
             self._save_sync(filename, data)
     
     def _save_sync(self, filename: str, data: Any):
+        """Synchronous save with atomic write"""
         filepath = self.data_dir / filename
         temp_path = filepath.with_suffix('.tmp')
+        
         try:
             with open(temp_path, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -173,29 +207,31 @@ class DataManager:
             raise
     
     async def cleanup_cache(self):
+        """Clear cache to free memory"""
         async with self._lock:
             self._cache.clear()
 
 # ==========================
-# XP System (with all fixes)
+# XP System
 # ==========================
 
 class XPSystem:
+    """XP, levels, streaks, and achievements. No daily caps — progression is
+    unlimited, rate-limited only by the message cooldown and the voice cooldown."""
+
     def __init__(self, data_manager: DataManager):
         self.data_manager = data_manager
-        self.voice_activity: Dict[str, Dict[str, Any]] = {}
-        self.speaking_users: Dict[str, datetime] = {}
+        # per-user cooldown tracking for voice xp payouts, in-memory only
         self.last_voice_xp_time: Dict[str, datetime] = {}
-        self._voice_activity_lock = asyncio.Lock()
-        self._speaking_users_lock = asyncio.Lock()
-        self._last_xp_lock = asyncio.Lock()
-    
+
     @staticmethod
     def xp_for_level(level: int) -> int:
+        """XP required to clear `level` and reach level+1."""
         return Config.LEVEL_A * (level ** 2) + Config.LEVEL_B * level + Config.LEVEL_C
-    
+
     @staticmethod
     def get_level_from_xp(total_xp: int) -> Tuple[int, int]:
+        """Calculate level and progress into that level from total XP"""
         level = 0
         remaining = total_xp
         while True:
@@ -205,130 +241,154 @@ class XPSystem:
             remaining -= needed
             level += 1
         return level, remaining
-    
-    def calculate_voice_xp(self, member_id: str, elapsed_seconds: float, was_active: bool = False, streak_days: int = 0) -> Tuple[int, Dict[str, Any]]:
-        minutes = elapsed_seconds / 60
-        if minutes < 1:
-            return 0, {"minutes": minutes, "reason": "too_short"}
-        
-        if minutes <= 30:
-            base_rate = Config.VOICE_RATE_OPTIMAL
-            base_xp = int(minutes * base_rate)
-            tier = "optimal"
-        elif minutes <= 60:
-            base_rate = Config.VOICE_RATE_MODERATE
-            base_xp = int(30 * Config.VOICE_RATE_OPTIMAL + (minutes - 30) * base_rate)
-            tier = "moderate"
-        else:
-            base_rate = Config.VOICE_RATE_MINIMAL
-            base_xp = int(30 * Config.VOICE_RATE_OPTIMAL + 30 * Config.VOICE_RATE_MODERATE + (minutes - 60) * base_rate)
-            tier = "minimal"
-        
-        content_creator_bonus = 0
-        if minutes >= 90 and was_active:
-            content_creator_bonus = Config.CONTENT_CREATOR_BONUS * 2
-        elif minutes >= 60 and was_active:
-            content_creator_bonus = Config.CONTENT_CREATOR_BONUS
-        
-        activity_bonus = Config.ACTIVITY_BONUS if was_active else 0
-        streak_bonus = 0
-        if streak_days >= Config.STREAK_THRESHOLD:
-            streak_bonus = min(streak_days * Config.STREAK_BONUS_PER_DAY, Config.STREAK_BONUS_MAX)
-        
-        total_xp = base_xp + activity_bonus + content_creator_bonus + streak_bonus
-        double_multiplier = Config.is_double_xp()
-        total_xp = int(total_xp * double_multiplier)
-        
-        breakdown = {
-            "minutes": minutes,
-            "tier": tier,
-            "base_rate": base_rate,
-            "base_xp": base_xp,
-            "activity_bonus": activity_bonus,
-            "content_creator_bonus": content_creator_bonus,
-            "streak_bonus": streak_bonus,
-            "streak_days": streak_days,
-            "double_xp": double_multiplier,
-            "total_xp": total_xp,
-            "was_active": was_active,
-            "capped": False
+
+    @staticmethod
+    def _new_entry() -> Dict[str, Any]:
+        """Default shape for a fresh user record."""
+        return {
+            "xp": 0,
+            "last_message_time": None,
+            "last_daily_bonus": None,
+            "daily_voice_xp": {},
+            "daily_message_xp": {},
+            "voice_days": [],
+            "total_voice_time": 0,
+            "total_messages": 0,
+            "achievements": [],
         }
-        return total_xp, breakdown
-    
-    def _calculate_voice_streak(self, member_id: str, levels_data: Dict) -> int:
-        user_data = levels_data.get(member_id, {})
-        daily_voice = user_data.get("daily_voice_xp", {})
+
+    @staticmethod
+    def _ensure_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Backfill any fields missing from an older or partially-built entry,
+        in place. Every function below calls this before touching an entry so
+        it doesn't matter which command created the record first."""
+        for key, default in XPSystem._new_entry().items():
+            entry.setdefault(key, default)
+        return entry
+
+    @staticmethod
+    def _voice_streak(entry: Dict[str, Any]) -> int:
+        """Consecutive days, ending today, with 50+ voice XP earned."""
+        daily_voice = entry.get("daily_voice_xp", {})
         if not daily_voice:
             return 0
         today = datetime.now(timezone.utc).date()
         streak = 0
         for i in range(30):
             check_date = (today - timedelta(days=i)).isoformat()
-            if check_date in daily_voice and daily_voice[check_date] > 50:
+            if daily_voice.get(check_date, 0) > 50:
                 streak += 1
             else:
                 break
         return streak
-    
-    async def add_voice_xp(self, member: discord.Member, elapsed_seconds: float, was_active: bool = False) -> Dict[str, Any]:
+
+    @staticmethod
+    def calculate_voice_xp(elapsed_seconds: float, streak_days: int = 0) -> Tuple[int, Dict[str, Any]]:
+        """XP for a single voice session. Tiered rate — the first 30 minutes
+        pay the most per minute, tapering off after that so a session left
+        open all day doesn't dwarf normal use.
+
+        NOTE — this resets on every join/leave, same as the ramp model it
+        replaced. That means a short-hop farmer just keeps re-collecting the
+        top tier; VOICE_XP_COOLDOWN_SECONDS (checked in add_voice_xp) is what
+        actually stops that, not this curve. If you want the curve itself to
+        resist hopping, track cumulative daily minutes instead of per-session
+        — bigger change, say so if you want it.
+        """
+        minutes = elapsed_seconds / 60
+        if minutes < Config.VOICE_MINIMUM_MINUTES:
+            return 0, {"minutes": minutes, "reason": "too_short"}
+
+        if minutes <= 30:
+            tier, rate = "optimal", Config.VOICE_RATE_OPTIMAL
+            base_xp = int(minutes * rate)
+        elif minutes <= 60:
+            tier, rate = "moderate", Config.VOICE_RATE_MODERATE
+            base_xp = int(30 * Config.VOICE_RATE_OPTIMAL + (minutes - 30) * rate)
+        else:
+            tier, rate = "minimal", Config.VOICE_RATE_MINIMAL
+            base_xp = int(
+                30 * Config.VOICE_RATE_OPTIMAL
+                + 30 * Config.VOICE_RATE_MODERATE
+                + (minutes - 60) * rate
+            )
+
+        content_creator_bonus = 0
+        if minutes >= 90:
+            content_creator_bonus = Config.CONTENT_CREATOR_BONUS * 2
+        elif minutes >= 60:
+            content_creator_bonus = Config.CONTENT_CREATOR_BONUS
+
+        streak_bonus = 0
+        if streak_days >= Config.STREAK_THRESHOLD:
+            streak_bonus = min(streak_days * Config.STREAK_BONUS_PER_DAY, Config.STREAK_BONUS_MAX)
+
+        double_multiplier = Config.is_double_xp()
+        total_xp = int((base_xp + content_creator_bonus) * double_multiplier) + streak_bonus
+
+        breakdown = {
+            "minutes": minutes,
+            "tier": tier,
+            "rate": rate,
+            "base_xp": base_xp,
+            "content_creator_bonus": content_creator_bonus,
+            "streak_bonus": streak_bonus,
+            "streak_days": streak_days,
+            "double_xp": double_multiplier,
+        }
+        return total_xp, breakdown
+
+    async def add_voice_xp(self, member: discord.Member, elapsed_seconds: float) -> Dict[str, Any]:
+        """Add XP from a voice session. Subject to a per-user cooldown so rapid
+        join/leave cycling can't re-trigger payout."""
         user_id = str(member.id)
         now = datetime.now(timezone.utc)
-        async with self._last_xp_lock:
-            last_time = self.last_voice_xp_time.get(user_id)
+
+        last_time = self.last_voice_xp_time.get(user_id)
         if last_time:
-            cooldown_remaining = Config.VOICE_XP_COOLDOWN_SECONDS - (now - last_time).total_seconds()
-            if cooldown_remaining > 0:
+            remaining = Config.VOICE_XP_COOLDOWN_SECONDS - (now - last_time).total_seconds()
+            if remaining > 0:
                 return {
                     "xp_gained": 0,
                     "leveled_up": False,
                     "old_level": None,
                     "new_level": None,
                     "total_xp": None,
-                    "breakdown": {"reason": "cooldown", "cooldown_remaining": cooldown_remaining},
-                    "capped": False
+                    "breakdown": {"reason": "cooldown", "cooldown_remaining": remaining},
                 }
+
         levels = await self.data_manager.load("levels.json", {})
-        streak_days = self._calculate_voice_streak(user_id, levels)
-        xp_gained, breakdown = self.calculate_voice_xp(user_id, elapsed_seconds, was_active, streak_days)
-        result = {
+        entry = self._ensure_entry(levels.get(user_id, self._new_entry()))
+        levels[user_id] = entry
+
+        streak_days = self._voice_streak(entry)
+        xp_gained, breakdown = self.calculate_voice_xp(elapsed_seconds, streak_days)
+
+        result: Dict[str, Any] = {
             "xp_gained": xp_gained,
             "leveled_up": False,
             "old_level": None,
             "new_level": None,
             "total_xp": None,
             "breakdown": breakdown,
-            "capped": False
         }
         if xp_gained <= 0:
             return result
-        if user_id not in levels:
-            levels[user_id] = {
-                "xp": 0,
-                "last_message_time": None,
-                "daily_voice_xp": {},
-                "daily_message_xp": {},
-                "voice_days": [],
-                "total_voice_time": 0,
-                "total_messages": 0,
-                "achievements": []
-            }
-        entry = levels[user_id]
-        today = datetime.now(timezone.utc).date().isoformat()
-        if "daily_voice_xp" not in entry:
-            entry["daily_voice_xp"] = {}
+
+        today = now.date().isoformat()
         entry["daily_voice_xp"][today] = entry["daily_voice_xp"].get(today, 0) + xp_gained
-        entry["total_voice_time"] = entry.get("total_voice_time", 0) + elapsed_seconds
-        if "voice_days" not in entry:
-            entry["voice_days"] = []
+        entry["total_voice_time"] += elapsed_seconds
         if today not in entry["voice_days"]:
             entry["voice_days"].append(today)
             entry["voice_days"] = entry["voice_days"][-30:]
+
         old_level, _ = self.get_level_from_xp(entry["xp"])
         entry["xp"] += xp_gained
         new_level, _ = self.get_level_from_xp(entry["xp"])
+
         await self.data_manager.save("levels.json", levels)
-        async with self._last_xp_lock:
-            self.last_voice_xp_time[user_id] = now
+        self.last_voice_xp_time[user_id] = now
+
         result.update({
             "leveled_up": new_level > old_level,
             "old_level": old_level,
@@ -336,26 +396,19 @@ class XPSystem:
             "total_xp": entry["xp"],
         })
         return result
-    
+
     async def award_message_xp(self, message: discord.Message) -> bool:
+        """Award XP for a message, tiered by length with small quality bonuses.
+        Returns True if this message leveled the author up."""
         if not message.guild or message.author.bot:
             return False
+
         levels = await self.data_manager.load("levels.json", {})
         user_id = str(message.author.id)
-        if user_id not in levels:
-            levels[user_id] = {
-                "xp": 0,
-                "last_message_time": None,
-                "daily_voice_xp": {},
-                "daily_message_xp": {},
-                "voice_days": [],
-                "total_voice_time": 0,
-                "total_messages": 0,
-                "achievements": []
-            }
-        entry = levels[user_id]
+        entry = self._ensure_entry(levels.get(user_id, self._new_entry()))
+        levels[user_id] = entry
+
         now = datetime.now(timezone.utc)
-        today = now.date().isoformat()
         if entry.get("last_message_time"):
             try:
                 last_time = datetime.fromisoformat(entry["last_message_time"])
@@ -363,110 +416,119 @@ class XPSystem:
                     return False
             except ValueError:
                 pass
-        if "daily_message_xp" not in entry:
-            entry["daily_message_xp"] = {}
-        content_length = len(message.content.strip())
-        word_count = len(message.content.split())
-        has_links = "http" in message.content.lower()
-        is_reply = message.reference is not None
-        quality_bonus = 0
-        if word_count > 20:
-            quality_bonus += 5
-        if has_links:
-            quality_bonus += 3
-        if is_reply:
-            quality_bonus += 2
+
+        content = message.content.strip()
+        content_length = len(content)
+        word_count = len(content.split())
+
         if content_length < 10:
             base_min, base_max = Config.MESSAGE_XP_SHORT
-            base_xp = random.randint(base_min, base_max)
         elif content_length < 50:
             base_min, base_max = Config.MESSAGE_XP_MEDIUM
-            base_xp = random.randint(base_min, base_max)
         else:
             base_min, base_max = Config.MESSAGE_XP_LONG
-            base_xp = random.randint(base_min, base_max)
-        gained = base_xp + quality_bonus
-        double_multiplier = Config.is_double_xp()
-        gained = int(gained * double_multiplier)
+        base_xp = random.randint(base_min, base_max)
+
+        quality_bonus = 0
+        if word_count > 20:
+            quality_bonus += Config.QUALITY_BONUS_LONG_MESSAGE
+        if "http" in content.lower():
+            quality_bonus += Config.QUALITY_BONUS_LINK
+        if message.reference is not None:
+            quality_bonus += Config.QUALITY_BONUS_REPLY
+
+        gained = int((base_xp + quality_bonus) * Config.is_double_xp())
+
+        today = now.date().isoformat()
         entry["last_message_time"] = now.isoformat()
         entry["daily_message_xp"][today] = entry["daily_message_xp"].get(today, 0) + gained
-        entry["total_messages"] = entry.get("total_messages", 0) + 1
+        entry["total_messages"] += 1
+
         old_level, _ = self.get_level_from_xp(entry["xp"])
         entry["xp"] += gained
         new_level, _ = self.get_level_from_xp(entry["xp"])
+
         await self.data_manager.save("levels.json", levels)
         return new_level > old_level
-    
-    async def get_rank(self, user_id: str) -> Tuple[int, int, int]:
+
+    async def get_rank(self, user_id: str) -> Tuple[Optional[int], int, int]:
+        """Get user's rank, level, and total XP"""
         levels = await self.data_manager.load("levels.json", {})
         entry = levels.get(user_id, {"xp": 0})
-        xp = entry["xp"]
+        xp = entry.get("xp", 0)
         level, _ = self.get_level_from_xp(xp)
-        sorted_users = sorted(levels.items(), key=lambda kv: kv[1].get("xp", 0), reverse=True)
-        rank = next((i for i, (uid, _) in enumerate(sorted_users, 1) if uid == user_id), None)
+
+        sorted_users = sorted(
+            levels.items(),
+            key=lambda kv: kv[1].get("xp", 0),
+            reverse=True
+        )
+        rank = next(
+            (i for i, (uid, _) in enumerate(sorted_users, 1) if uid == user_id),
+            None
+        )
         return rank, level, xp
-    
+
     async def get_daily_stats(self, user_id: str) -> Dict[str, Any]:
+        """Today's activity plus lifetime totals, for /stats."""
         levels = await self.data_manager.load("levels.json", {})
-        entry = levels.get(user_id, {})
+        entry = self._ensure_entry(levels.get(user_id, self._new_entry()))
         today = datetime.now(timezone.utc).date().isoformat()
-        streak = self._calculate_voice_streak(user_id, levels)
+
         return {
-            "daily_voice_xp": entry.get("daily_voice_xp", {}).get(today, 0),
-            "daily_message_xp": entry.get("daily_message_xp", {}).get(today, 0),
-            "voice_streak": streak,
+            "daily_voice_xp": entry["daily_voice_xp"].get(today, 0),
+            "daily_message_xp": entry["daily_message_xp"].get(today, 0),
+            "voice_streak": self._voice_streak(entry),
             "total_xp": entry.get("xp", 0),
             "total_voice_time": entry.get("total_voice_time", 0),
             "total_messages": entry.get("total_messages", 0),
-            "achievements": entry.get("achievements", [])
+            "achievements": entry.get("achievements", []),
         }
-    
+
     async def check_achievements(self, member: discord.Member) -> List[str]:
+        """Check thresholds and award any newly-unlocked achievements.
+        Membership is checked against the stored label text itself, not a
+        separate short key — comparing a key like "voice_veteran" against a
+        list of formatted labels never matches, which silently re-awards
+        every achievement on every check. Don't reintroduce that."""
         user_id = str(member.id)
         levels = await self.data_manager.load("levels.json", {})
-        entry = levels.get(user_id, {})
-        if "achievements" not in entry:
-            entry["achievements"] = []
+        entry = self._ensure_entry(levels.get(user_id, self._new_entry()))
+        levels[user_id] = entry
+
+        unlocked = entry["achievements"]
         new_achievements = []
-        total_voice_hours = entry.get("total_voice_time", 0) / 3600
-        if total_voice_hours >= 10 and "voice_veteran" not in entry["achievements"]:
-            new_achievements.append("🎙️ Voice Veteran (10 hours)")
-        if total_voice_hours >= 50 and "voice_master" not in entry["achievements"]:
-            new_achievements.append("🎙️ Voice Master (50 hours)")
-        if total_voice_hours >= 100 and "voice_legend" not in entry["achievements"]:
-            new_achievements.append("🎙️ Voice Legend (100 hours)")
-        if total_voice_hours >= 500 and "voice_god" not in entry["achievements"]:
-            new_achievements.append("🎙️ Voice God (500 hours)")
-        if total_voice_hours >= 1000 and "voice_immortal" not in entry["achievements"]:
-            new_achievements.append("🎙️ Voice Immortal (1000 hours)")
-        streak = self._calculate_voice_streak(user_id, levels)
-        if streak >= 7 and "weekly_warrior" not in entry["achievements"]:
-            new_achievements.append("🔥 Weekly Warrior (7-day streak)")
-        if streak >= 30 and "monthly_monster" not in entry["achievements"]:
-            new_achievements.append("🔥 Monthly Monster (30-day streak)")
-        if streak >= 100 and "streak_legend" not in entry["achievements"]:
-            new_achievements.append("🔥 Streak Legend (100-day streak)")
+
+        def maybe_add(label: str, condition: bool):
+            if condition and label not in unlocked:
+                new_achievements.append(label)
+
+        voice_hours = entry.get("total_voice_time", 0) / 3600
+        maybe_add("🎙️ Voice Veteran (10 hours)", voice_hours >= 10)
+        maybe_add("🎙️ Voice Master (50 hours)", voice_hours >= 50)
+        maybe_add("🎙️ Voice Legend (100 hours)", voice_hours >= 100)
+        maybe_add("🎙️ Voice God (500 hours)", voice_hours >= 500)
+        maybe_add("🎙️ Voice Immortal (1000 hours)", voice_hours >= 1000)
+
+        streak = self._voice_streak(entry)
+        maybe_add("🔥 Weekly Warrior (7-day streak)", streak >= 7)
+        maybe_add("🔥 Monthly Monster (30-day streak)", streak >= 30)
+        maybe_add("🔥 Streak Legend (100-day streak)", streak >= 100)
+
         total_messages = entry.get("total_messages", 0)
-        if total_messages >= 100 and "chatty_cathy" not in entry["achievements"]:
-            new_achievements.append("💬 Chatty Cathy (100 messages)")
-        if total_messages >= 1000 and "message_master" not in entry["achievements"]:
-            new_achievements.append("💬 Message Master (1000 messages)")
-        if total_messages >= 10000 and "message_legend" not in entry["achievements"]:
-            new_achievements.append("💬 Message Legend (10,000 messages)")
-        _, level, _ = await self.get_rank(user_id)
-        if level >= 25 and "level_enthusiast" not in entry["achievements"]:
-            new_achievements.append("⭐ Level Enthusiast (Level 25)")
-        if level >= 50 and "level_expert" not in entry["achievements"]:
-            new_achievements.append("⭐ Level Expert (Level 50)")
-        if level >= 100 and "level_legend" not in entry["achievements"]:
-            new_achievements.append("⭐ Level Legend (Level 100)")
-        if level >= 200 and "level_god" not in entry["achievements"]:
-            new_achievements.append("⭐ Level God (Level 200)")
-        if level >= 500 and "level_immortal" not in entry["achievements"]:
-            new_achievements.append("⭐ Level Immortal (Level 500)")
+        maybe_add("💬 Chatty Cathy (100 messages)", total_messages >= 100)
+        maybe_add("💬 Message Master (1,000 messages)", total_messages >= 1000)
+        maybe_add("💬 Message Legend (10,000 messages)", total_messages >= 10000)
+
+        level, _ = self.get_level_from_xp(entry.get("xp", 0))
+        maybe_add("⭐ Level Enthusiast (Level 25)", level >= 25)
+        maybe_add("⭐ Level Expert (Level 50)", level >= 50)
+        maybe_add("⭐ Level Legend (Level 100)", level >= 100)
+
         if new_achievements:
             entry["achievements"].extend(new_achievements)
             await self.data_manager.save("levels.json", levels)
+
         return new_achievements
 
 # ==========================
@@ -474,21 +536,34 @@ class XPSystem:
 # ==========================
 
 class LoggingService:
+    """Centralized logging with retry mechanism"""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._retry_count = 3
         self._retry_delay = 1
     
-    async def log_action(self, guild: discord.Guild, description: str,
-                          color: discord.Color = discord.Color.blurple(),
-                          embed_kwargs: Optional[Dict] = None):
+    async def log_action(
+        self,
+        guild: discord.Guild,
+        description: str,
+        color: discord.Color = discord.Color.blurple(),
+        embed_kwargs: Optional[Dict] = None
+    ):
+        """Log an action with retry mechanism"""
         channel = guild.get_channel(Config.LOG_CHANNEL_ID)
         if not channel:
             logger.error(f"Log channel {Config.LOG_CHANNEL_ID} not found")
             return
+        
         embed_kwargs = embed_kwargs or {}
-        embed = discord.Embed(description=description, color=color,
-                              timestamp=datetime.now(timezone.utc), **embed_kwargs)
+        embed = discord.Embed(
+            description=description,
+            color=color,
+            timestamp=datetime.now(timezone.utc),
+            **embed_kwargs
+        )
+        
         for attempt in range(self._retry_count):
             try:
                 await channel.send(embed=embed)
@@ -499,48 +574,85 @@ class LoggingService:
                 else:
                     await asyncio.sleep(self._retry_delay * (attempt + 1))
     
-    async def announce_level_up(self, guild: discord.Guild, member: discord.Member,
-                                 new_level: int, fallback_channel: discord.TextChannel = None):
-        channel = guild.get_channel(Config.LEVEL_UP_CHANNEL_ID) or fallback_channel or guild.get_channel(Config.LOG_CHANNEL_ID)
+    async def announce_level_up(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        new_level: int,
+        fallback_channel: discord.TextChannel = None
+    ):
+        """Announce a level up"""
+        # Try level-up channel first
+        channel = guild.get_channel(Config.LEVEL_UP_CHANNEL_ID)
+        if not channel:
+            channel = fallback_channel or guild.get_channel(Config.LOG_CHANNEL_ID)
+        
         if channel:
             embed = discord.Embed(
-                description=f"{member.mention} just hit **level {new_level}**! 🎉",
+                description=f"{member.mention} just hit **level {new_level}**.",
                 color=discord.Color.gold()
             )
-            embed.set_author(name=f"{member.display_name} leveled up!", icon_url=member.display_avatar.url)
+            embed.set_author(
+                name=f"{member.display_name} leveled up!",
+                icon_url=member.display_avatar.url
+            )
             embed.set_thumbnail(url=member.display_avatar.url)
-            achievements = await bot.xp_system.check_achievements(member)
-            if achievements:
-                embed.add_field(name="🏆 Achievements Unlocked", value="\n".join(achievements[:5]), inline=False)
+            
             try:
                 await channel.send(embed=embed)
-            except Exception as e:
+            except (discord.Forbidden, discord.HTTPException) as e:
                 logger.warning(f"Failed to send level-up announcement: {e}")
-        await self.log_action(guild, f"⬆️ **{member.mention}** leveled up to **level {new_level}**", discord.Color.gold())
-    
-    async def log_voice_xp(self, guild: discord.Guild, member: discord.Member, result: Dict[str, Any]):
+        
+        # Log it
+        await self.log_action(
+            guild,
+            f"⬆️ **{member.mention}** leveled up to **level {new_level}**",
+            discord.Color.gold()
+        )
+
+    async def log_voice_xp(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        result: Dict[str, Any]
+    ):
+        """Log a voice XP award with the full rate breakdown — this is the
+        detail you need to see *why* two members with similar voice time
+        ended up with different totals."""
         breakdown = result["breakdown"]
+
         if breakdown.get("reason") == "cooldown":
             remaining = breakdown.get("cooldown_remaining", 0)
-            await self.log_action(guild, f"⏳ **{member.mention}** voice XP on cooldown ({remaining:.0f}s remaining)", discord.Color.greyple())
+            await self.log_action(
+                guild,
+                f"⏳ **{member.mention}** voice XP on cooldown ({remaining:.0f}s remaining)",
+                discord.Color.greyple()
+            )
             return
+
+        if breakdown.get("reason") == "too_short":
+            return  # below the 1-minute floor, nothing worth logging
+
         minutes = breakdown.get("minutes", 0)
         tier = breakdown.get("tier", "unknown")
-        base_xp = breakdown.get("base_xp", 0)
-        activity_bonus = breakdown.get("activity_bonus", 0)
-        content_creator_bonus = breakdown.get("content_creator_bonus", 0)
-        streak_bonus = breakdown.get("streak_bonus", 0)
-        streak_days = breakdown.get("streak_days", 0)
-        double_xp = breakdown.get("double_xp", 1.0)
-        lines = [
-            f"🎧 **{member.mention}** — {minutes:.1f} min in voice → +{result['xp_gained']} XP",
-            f"`{base_xp} base ({tier} tier) + {activity_bonus} active + {content_creator_bonus} creator`",
+
+        lines = [f"🎧 **{member.mention}** — {minutes:.1f} min in voice → +{result['xp_gained']} XP"]
+
+        detail = f"`{breakdown['base_xp']} base ({tier} tier, {breakdown['rate']}/min)`"
+        if breakdown.get("content_creator_bonus"):
+            detail += f" + `{breakdown['content_creator_bonus']} content-creator bonus`"
+        lines.append(detail)
+
+        lines.append(
             f"total XP: **{result['total_xp']:,}** — level {result['old_level']} → {result['new_level']}"
-        ]
-        if streak_days >= Config.STREAK_THRESHOLD:
-            lines.append(f"🔥 {streak_days}-day streak! (+{streak_bonus} bonus)")
-        if double_xp > 1.0:
-            lines.append(f"⚡ DOUBLE XP EVENT! ({double_xp}x multiplier)")
+        )
+
+        if breakdown.get("streak_days", 0) >= Config.STREAK_THRESHOLD:
+            lines.append(f"🔥 {breakdown['streak_days']}-day streak (+{breakdown['streak_bonus']} bonus)")
+
+        if breakdown.get("double_xp", 1.0) > 1.0:
+            lines.append(f"⚡ double xp event active ({breakdown['double_xp']}x)")
+
         await self.log_action(guild, "\n".join(lines), discord.Color.teal())
 
 # ==========================
@@ -548,27 +660,38 @@ class LoggingService:
 # ==========================
 
 class PermissionService:
+    """Centralized permission checking"""
+    
     @staticmethod
     def has_staff_role(member: discord.Member) -> bool:
+        """Check if member has any staff role"""
         return any(role.id in Config.STAFF_ROLES for role in member.roles)
     
     @staticmethod
     def can_use_fakeban(member: discord.Member) -> bool:
+        """Check if member can use fakeban"""
         return any(role.id in Config.FAKEBAN_ALLOWED_ROLES for role in member.roles)
-    
+
     @staticmethod
     def can_use_selfdestruct(member: discord.Member) -> bool:
+        """Check if member can trigger self-destruct"""
         return any(role.id in Config.SELFDESTRUCT_ALLOWED_ROLES for role in member.roles)
     
     @staticmethod
     def is_admin(member: discord.Member) -> bool:
+        """Check if member is administrator"""
         return member.guild_permissions.administrator
     
     @staticmethod
     async def require_staff(interaction: discord.Interaction) -> bool:
+        """Check staff permission and respond if denied"""
         if PermissionService.has_staff_role(interaction.user):
             return True
-        await interaction.response.send_message("❌ You don't have permission for that.", ephemeral=True)
+        
+        await interaction.response.send_message(
+            "❌ You don't have permission for that.",
+            ephemeral=True
+        )
         return False
 
 # ==========================
@@ -576,22 +699,36 @@ class PermissionService:
 # ==========================
 
 class ModBot(commands.Bot):
+    """Main bot class with enhanced features"""
+    
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
-        intents.voice_states = True
-        super().__init__(command_prefix="!", intents=intents, help_command=None)
+        
+        super().__init__(
+            command_prefix="!",
+            intents=intents,
+            help_command=None  # Custom help command
+        )
+        
         self.data_manager = DataManager(Config.DATA_DIR)
         self.xp_system = XPSystem(self.data_manager)
         self.logging_service = LoggingService(self)
         self.permission_service = PermissionService()
-        self.voice_sessions: Dict[str, Dict[str, Any]] = {}
-        self._voice_sessions_lock = asyncio.Lock()
+        
+        # Voice sessions cache
+        self.voice_sessions: Dict[str, datetime] = {}
+        
+        # Note: Background tasks are started in setup_hook
     
     async def setup_hook(self):
+        """Setup hook - runs before bot starts"""
+        # Start background tasks (event loop is running)
         self.voice_cleanup.start()
         self.verified_role_sweep.start()
+        
+        # Sync slash commands
         try:
             await self.tree.sync()
             logger.info("Slash commands synced")
@@ -599,132 +736,162 @@ class ModBot(commands.Bot):
             logger.error(f"Failed to sync commands: {e}")
     
     async def on_ready(self):
+        """Called when bot is ready"""
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
-        config = await self.data_manager.load("config.json", {})
-        if "double_xp_events" in config:
-            Config.DOUBLE_XP_EVENTS.update(config["double_xp_events"])
-            logger.info(f"Loaded {len(config['double_xp_events'])} double XP events")
+
+        # log the voice xp settings once at startup — first thing to check when
+        # someone says the numbers look wrong
+        logger.info(
+            f"voice xp settings — {Config.VOICE_RATE_OPTIMAL}/min (0-30m), "
+            f"{Config.VOICE_RATE_MODERATE}/min (30-60m), {Config.VOICE_RATE_MINIMAL}/min (60m+), "
+            f"{Config.VOICE_XP_COOLDOWN_SECONDS}s cooldown between paid sessions "
+            f"(resets per session — see XPSystem.calculate_voice_xp docstring)"
+        )
+
+        # double xp events are set at runtime via /doublexp, so they don't
+        # survive a restart unless we reload them from disk here
+        config_data = await self.data_manager.load("config.json", {})
+        if config_data.get("double_xp_events"):
+            Config.DOUBLE_XP_EVENTS.update(config_data["double_xp_events"])
+            logger.info(f"loaded {len(config_data['double_xp_events'])} double xp event(s) from disk")
+
+        # Validate configuration
         for guild in self.guilds:
             errors = Config.validate(guild)
             if errors:
                 logger.warning(f"Configuration errors in {guild.name}:")
                 for error in errors:
                     logger.warning(f"  - {error}")
+        
+        # Load voice sessions
         sessions = await self.data_manager.load("voice_sessions.json", {})
-        async with self._voice_sessions_lock:
-            for user_id, data in sessions.items():
-                try:
-                    if isinstance(data, str):
-                        start_time = datetime.fromisoformat(data)
-                        self.voice_sessions[user_id] = {"start_time": start_time, "was_active": False, "speaking_time": 0}
-                    else:
-                        start_time = datetime.fromisoformat(data["start_time"])
-                        self.voice_sessions[user_id] = {
-                            "start_time": start_time,
-                            "was_active": data.get("was_active", False),
-                            "speaking_time": data.get("speaking_time", 0)
-                        }
-                except Exception as e:
-                    logger.warning(f"Invalid voice session for {user_id}: {e}")
+        for user_id, timestamp in sessions.items():
+            try:
+                self.voice_sessions[user_id] = datetime.fromisoformat(timestamp)
+            except ValueError:
+                logger.warning(f"Invalid timestamp for voice session {user_id}")
+        
         logger.info(f"Bot is online in {len(self.guilds)} guilds")
+
+        # catch anyone who already holds both roles — role changes made while the
+        # bot was offline don't fire on_member_update, so this is the safety net
         for guild in self.guilds:
             await self.sweep_verified_roles(guild)
-    
+
     async def sync_verified_role(self, member: discord.Member) -> bool:
+        """Strip the unverified role from a member who holds the verified role.
+        Returns True if a role was actually removed."""
         if not Config.VERIFIED_ROLE_ID or not Config.UNVERIFIED_ROLE_ID:
-            return False
+            return False  # not configured — no-op rather than guessing at IDs
+
         role_ids = {r.id for r in member.roles}
         if Config.VERIFIED_ROLE_ID not in role_ids or Config.UNVERIFIED_ROLE_ID not in role_ids:
             return False
+
         unverified_role = member.guild.get_role(Config.UNVERIFIED_ROLE_ID)
         if not unverified_role:
-            logger.warning(f"Unverified role {Config.UNVERIFIED_ROLE_ID} not found in {member.guild.name}")
+            logger.warning(f"unverified role {Config.UNVERIFIED_ROLE_ID} not found in {member.guild.name}")
             return False
+
         try:
             await member.remove_roles(unverified_role, reason="Verified role present — removing unverified")
-        except Exception as e:
-            logger.error(f"Failed to remove unverified role from {member}: {e}")
+        except (discord.Forbidden, discord.HTTPException) as e:
+            logger.error(f"failed to remove unverified role from {member}: {e}")
             return False
-        logger.info(f"Removed unverified from {member} ({member.id}) in {member.guild.name}")
+
+        logger.info(f"removed unverified from {member} ({member.id}) in {member.guild.name}")
         return True
-    
+
     async def sweep_verified_roles(self, guild: discord.Guild):
+        """Check every member for the verified+unverified overlap. Run on startup
+        and periodically as a safety net for anything on_member_update missed."""
         if not Config.VERIFIED_ROLE_ID or not Config.UNVERIFIED_ROLE_ID:
             return
+
         verified_role = guild.get_role(Config.VERIFIED_ROLE_ID)
         if not verified_role:
             return
+
         cleaned = 0
         for member in verified_role.members:
-            if any(r.id == Config.UNVERIFIED_ROLE_ID for r in member.roles):
-                if await self.sync_verified_role(member):
-                    cleaned += 1
+            if await self.sync_verified_role(member):
+                cleaned += 1
+
         if cleaned:
-            logger.info(f"Verified-role sweep cleaned {cleaned} member(s) in {guild.name}")
+            logger.info(f"verified-role sweep cleaned {cleaned} member(s) in {guild.name}")
     
     def format_progress_bar(self, progress: int, needed: int, length: int = 12) -> str:
+        """Format a progress bar"""
         if needed <= 0:
             return "░" * length
+        
         filled = min(length, int(length * progress / needed))
         return "█" * filled + "░" * (length - filled)
     
+    # ==========================
+    # Voice Cleanup Task
+    # ==========================
+    
     @tasks.loop(minutes=5)
     async def voice_cleanup(self):
+        """Clean up stale voice sessions"""
         try:
+            # Ensure bot is ready before running
             await self.wait_until_ready()
+            
             now = datetime.now(timezone.utc)
             active_users = set()
+            
             for guild in self.guilds:
                 afk_channel = guild.afk_channel
-                for vc in guild.voice_channels:
-                    if vc == afk_channel:
+                for voice_channel in guild.voice_channels:
+                    if voice_channel == afk_channel:
                         continue
-                    for member in vc.members:
+                    for member in voice_channel.members:
                         if not member.bot:
                             active_users.add(str(member.id))
-            async with self._voice_sessions_lock:
-                stale = [uid for uid in self.voice_sessions if uid not in active_users]
-                for uid in stale:
-                    del self.voice_sessions[uid]
-            async with self.xp_system._voice_activity_lock:
-                stale_act = [uid for uid in self.xp_system.voice_activity if uid not in active_users]
-                for uid in stale_act:
-                    del self.xp_system.voice_activity[uid]
-            async with self.xp_system._speaking_users_lock:
-                stale_speak = [uid for uid in self.xp_system.speaking_users if uid not in active_users]
-                for uid in stale_speak:
-                    del self.xp_system.speaking_users[uid]
-            if stale or stale_act or stale_speak:
-                logger.info(f"Cleaned up {len(stale)} sessions, {len(stale_act)} activity, {len(stale_speak)} speaking")
-                async with self._voice_sessions_lock:
-                    save_data = {
-                        uid: {
-                            "start_time": data["start_time"].isoformat(),
-                            "was_active": data["was_active"],
-                            "speaking_time": data["speaking_time"]
-                        }
-                        for uid, data in self.voice_sessions.items()
-                    }
-                await self.data_manager.save("voice_sessions.json", save_data)
+            
+            # Remove stale sessions
+            stale_users = [uid for uid in self.voice_sessions if uid not in active_users]
+            for user_id in stale_users:
+                del self.voice_sessions[user_id]
+            
+            if stale_users:
+                logger.info(f"Cleaned up {len(stale_users)} stale voice sessions")
+                await self.data_manager.save("voice_sessions.json", {
+                    uid: dt.isoformat() for uid, dt in self.voice_sessions.items()
+                })
+                
         except Exception as e:
             logger.error(f"Voice cleanup failed: {e}")
     
     @voice_cleanup.before_loop
     async def before_voice_cleanup(self):
+        """Wait for bot to be ready before starting the loop"""
         await self.wait_until_ready()
-    
+
+    # ==========================
+    # Verified Role Sweep Task
+    # ==========================
+
     @tasks.loop(minutes=10)
     async def verified_role_sweep(self):
+        """Periodic safety net — catches anything on_member_update missed
+        (role added via external tool, audit gaps, etc)."""
         try:
             await self.wait_until_ready()
             for guild in self.guilds:
                 await self.sweep_verified_roles(guild)
         except Exception as e:
-            logger.error(f"Verified role sweep failed: {e}")
-    
+            logger.error(f"verified role sweep failed: {e}")
+
     @verified_role_sweep.before_loop
     async def before_verified_role_sweep(self):
         await self.wait_until_ready()
+
+# ==========================
+# Bot Instance
+# ==========================
 
 bot = ModBot()
 
@@ -734,28 +901,49 @@ bot = ModBot()
 
 @bot.event
 async def on_message(message: discord.Message):
+    """Handle message events"""
     if message.author.bot or not message.guild:
         return
+    
+    # Process XP
     leveled_up = await bot.xp_system.award_message_xp(message)
     if leveled_up:
         _, new_level, _ = await bot.xp_system.get_rank(str(message.author.id))
-        await bot.logging_service.announce_level_up(message.guild, message.author, new_level, message.channel)
+        await bot.logging_service.announce_level_up(
+            message.guild,
+            message.author,
+            new_level,
+            message.channel
+        )
+    
+    # Check staff first
     if bot.permission_service.has_staff_role(message.author):
         return
+    
+    # Only process target channel
     if message.channel.id != Config.TARGET_CHANNEL_ID:
         return
+    
+    # Handle forbidden messages
     await handle_forbidden_message(message)
 
 async def handle_forbidden_message(message: discord.Message):
+    """Handle messages in restricted channel"""
     user_id = str(message.author.id)
     now = datetime.now(timezone.utc)
+    
+    # Delete the message
     try:
         await message.delete()
     except discord.Forbidden:
         logger.warning(f"Missing Manage Messages permission in {message.channel}")
         return
+    
+    # Check warning status
     warnings = await bot.data_manager.load("warnings.json", {})
     last_warning = warnings.get(user_id)
+    
+    # Check if warning has expired
     warning_valid = False
     if last_warning:
         try:
@@ -763,33 +951,42 @@ async def handle_forbidden_message(message: discord.Message):
             warning_valid = (now - last_time).total_seconds() < (Config.WARNING_EXPIRY_DAYS * 86400)
         except ValueError:
             pass
+    
     if not warning_valid:
+        # First warning
         warnings[user_id] = now.isoformat()
         await bot.data_manager.save("warnings.json", warnings)
+        
         warning_msg = await message.channel.send(
             f"{message.author.mention} ⚠️ **Warning**\n"
             "Messages are not allowed in this channel.\n"
             "Your next message here will result in a ban."
         )
         await warning_msg.delete(delay=10)
+        
         await bot.logging_service.log_action(
             message.guild,
             f"⚠️ Warned **{message.author.mention}** for posting in {message.channel.mention}",
             discord.Color.orange()
         )
         return
+    
+    # Ban the user
     try:
         await message.author.ban(reason="Ignored warning in restricted channel")
         warnings.pop(user_id, None)
         await bot.data_manager.save("warnings.json", warnings)
+        
         ban_msg = await message.channel.send(f"🔨 {message.author.mention} has been banned.")
         await ban_msg.delete(delay=10)
+        
         logger.info(f"Banned {message.author} from {message.guild}")
         await bot.logging_service.log_action(
             message.guild,
             f"🔨 Banned **{message.author.mention}** for posting in {message.channel.mention} after warning",
             discord.Color.red()
         )
+        
     except discord.Forbidden:
         logger.warning(f"Cannot ban {message.author} - missing permissions")
     except Exception as e:
@@ -797,14 +994,22 @@ async def handle_forbidden_message(message: discord.Message):
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
+    """Catch role changes — specifically, verified being granted while
+    unverified is still present."""
     if before.roles == after.roles:
-        return
+        return  # something else changed (nickname, etc), not our concern
+
     before_ids = {r.id for r in before.roles}
     after_ids = {r.id for r in after.roles}
-    verified_just_added = (Config.VERIFIED_ROLE_ID in after_ids and Config.VERIFIED_ROLE_ID not in before_ids)
+
+    verified_just_added = (
+        Config.VERIFIED_ROLE_ID in after_ids and Config.VERIFIED_ROLE_ID not in before_ids
+    )
     verified_already_present = Config.VERIFIED_ROLE_ID in after_ids
+
     if not verified_already_present:
         return
+
     if await bot.sync_verified_role(after):
         await bot.logging_service.log_action(
             after.guild,
@@ -814,419 +1019,798 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         )
 
 @bot.event
-async def on_speaking_update(member: discord.Member, speaking: bool):
+async def on_voice_state_update(
+    member: discord.Member,
+    before: discord.VoiceState,
+    after: discord.VoiceState
+):
+    """Handle voice state changes for XP"""
     if member.bot:
         return
-    user_id = str(member.id)
-    async with bot.xp_system._voice_activity_lock:
-        if user_id in bot.xp_system.voice_activity:
-            if speaking:
-                bot.xp_system.voice_activity[user_id]["was_active"] = True
-                bot.xp_system.voice_activity[user_id]["speaking_time"] += 1
-                async with bot._voice_sessions_lock:
-                    if user_id in bot.voice_sessions:
-                        bot.voice_sessions[user_id]["was_active"] = True
-                        bot.voice_sessions[user_id]["speaking_time"] += 1
-    async with bot.xp_system._speaking_users_lock:
-        if speaking:
-            bot.xp_system.speaking_users[user_id] = datetime.now(timezone.utc)
-        else:
-            if user_id in bot.xp_system.speaking_users:
-                del bot.xp_system.speaking_users[user_id]
-
-@bot.event
-async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    if member.bot:
-        return
+    
     guild = member.guild
     afk_channel = guild.afk_channel
+    
     before_counts = before.channel and before.channel != afk_channel
     after_counts = after.channel and after.channel != afk_channel
+    
     now = datetime.now(timezone.utc)
+    
     if after_counts and not before_counts:
-        async with bot._voice_sessions_lock:
-            bot.voice_sessions[str(member.id)] = {"start_time": now, "was_active": False, "speaking_time": 0}
-        async with bot.xp_system._voice_activity_lock:
-            bot.xp_system.voice_activity[str(member.id)] = {"start_time": now, "last_check": now, "was_active": False, "speaking_time": 0}
-        logger.info(f"Voice session start: {member} ({member.id}) in {guild.name} at {now.isoformat()}")
-        async with bot._voice_sessions_lock:
-            save_data = {
-                uid: {
-                    "start_time": data["start_time"].isoformat(),
-                    "was_active": data["was_active"],
-                    "speaking_time": data["speaking_time"]
-                }
-                for uid, data in bot.voice_sessions.items()
-            }
-        await bot.data_manager.save("voice_sessions.json", save_data)
+        # Joined a voice channel
+        bot.voice_sessions[str(member.id)] = now
+        logger.info(f"voice session start: {member} ({member.id}) in {guild.name} at {now.isoformat()}")
+        await bot.data_manager.save("voice_sessions.json", {
+            uid: dt.isoformat() for uid, dt in bot.voice_sessions.items()
+        })
+        
     elif before_counts and not after_counts:
+        # Left a voice channel
         user_id = str(member.id)
-        session_data = None
-        async with bot._voice_sessions_lock:
-            session_data = bot.voice_sessions.pop(user_id, None)
-        if session_data:
-            start_time = session_data["start_time"]
+        if user_id in bot.voice_sessions:
+            start_time = bot.voice_sessions.pop(user_id)
             elapsed = (now - start_time).total_seconds()
-            was_active = session_data["was_active"]
-            speaking_time = session_data["speaking_time"]
-            async with bot.xp_system._voice_activity_lock:
-                bot.xp_system.voice_activity.pop(user_id, None)
-            async with bot.xp_system._speaking_users_lock:
-                if user_id in bot.xp_system.speaking_users:
-                    del bot.xp_system.speaking_users[user_id]
-            if elapsed > 60:
-                result = await bot.xp_system.add_voice_xp(member, elapsed, was_active)
+            
+            if elapsed > 60:  # Only award if at least 1 minute
+                result = await bot.xp_system.add_voice_xp(member, elapsed)
                 breakdown = result["breakdown"]
+
                 if breakdown.get("reason") == "cooldown":
-                    logger.info(f"Voice XP on cooldown: {member} ({member.id}) – {breakdown.get('cooldown_remaining', 0):.0f}s remaining")
-                    if Config.VOICE_XP_DETAILED_LOGGING:
-                        await bot.logging_service.log_voice_xp(guild, member, result)
+                    logger.info(
+                        f"voice xp on cooldown: {member} ({member.id}) in {guild.name} — "
+                        f"{breakdown.get('cooldown_remaining', 0):.0f}s remaining"
+                    )
                 else:
-                    logger.info(f"Voice XP award: {member} ({member.id}) – {breakdown.get('minutes', 0):.1f} min, +{result['xp_gained']} XP, level {result['old_level']}->{result['new_level']}")
-                    if Config.VOICE_XP_DETAILED_LOGGING:
-                        await bot.logging_service.log_voice_xp(guild, member, result)
+                    logger.info(
+                        f"voice xp award: {member} ({member.id}) in {guild.name} — "
+                        f"session {start_time.isoformat()} -> {now.isoformat()} "
+                        f"({breakdown.get('minutes', 0):.1f} min elapsed, {breakdown.get('tier')} tier), "
+                        f"+{result['xp_gained']} xp, total {result['total_xp']}, "
+                        f"level {result['old_level']} -> {result['new_level']}, "
+                        f"breakdown={breakdown}"
+                    )
+
                     if result["leveled_up"]:
                         await bot.logging_service.announce_level_up(guild, member, result["new_level"])
+
+                if Config.VOICE_XP_DETAILED_LOGGING:
+                    await bot.logging_service.log_voice_xp(guild, member, result)
             else:
-                logger.info(f"Voice XP skipped: {member} ({member.id}) – session only {elapsed:.0f}s, below 60s minimum")
-            async with bot._voice_sessions_lock:
-                save_data = {
-                    uid: {
-                        "start_time": data["start_time"].isoformat(),
-                        "was_active": data["was_active"],
-                        "speaking_time": data["speaking_time"]
-                    }
-                    for uid, data in bot.voice_sessions.items()
-                }
-            await bot.data_manager.save("voice_sessions.json", save_data)
+                logger.info(
+                    f"voice xp skipped: {member} ({member.id}) in {guild.name} — "
+                    f"session only {elapsed:.0f}s, below 60s minimum"
+                )
+            
+            await bot.data_manager.save("voice_sessions.json", {
+                uid: dt.isoformat() for uid, dt in bot.voice_sessions.items()
+            })
 
 # ==========================
 # Slash Commands
 # ==========================
 
-# ---------- XP Event Group ----------
-xp_group = app_commands.Group(name="xp", description="Manage double XP events")
-
-@xp_group.command(name="add", description="Add a double XP event (Admin only)")
-@app_commands.describe(date="Date in YYYY-MM-DD format", multiplier="Multiplier (e.g. 2.0 for double)")
-@app_commands.guild_only()
-async def xp_add(interaction: discord.Interaction, date: str, multiplier: float = 2.0):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Only administrators can use this command.", ephemeral=True)
-        return
-    try:
-        dt = datetime.strptime(date, "%Y-%m-%d")
-        if dt.date() < datetime.now(timezone.utc).date():
-            await interaction.response.send_message("❌ Date cannot be in the past.", ephemeral=True)
-            return
-    except ValueError:
-        await interaction.response.send_message("❌ Invalid date format. Use YYYY-MM-DD.", ephemeral=True)
-        return
-    if multiplier <= 0 or multiplier > 10:
-        await interaction.response.send_message("❌ Multiplier must be between 0.1 and 10.0.", ephemeral=True)
-        return
-    Config.add_event(date, multiplier)
-    config = await bot.data_manager.load("config.json", {})
-    config["double_xp_events"] = Config.DOUBLE_XP_EVENTS
-    await bot.data_manager.save("config.json", config)
-    await interaction.response.send_message(f"✅ Double XP event added for **{date}** with **{multiplier}x** multiplier!")
-    await bot.logging_service.log_action(
-        interaction.guild,
-        f"⚡ **{interaction.user.mention}** added double XP for {date} ({multiplier}x)",
-        discord.Color.gold()
-    )
-
-@xp_group.command(name="list", description="List all upcoming double XP events")
-@app_commands.guild_only()
-async def xp_list(interaction: discord.Interaction):
-    if not await bot.permission_service.require_staff(interaction):
-        return
-    events = Config.get_all_events()
-    today = datetime.now(timezone.utc).date().isoformat()
-    upcoming = {d: m for d, m in events.items() if d >= today}
-    if not upcoming:
-        await interaction.response.send_message("📅 No upcoming double XP events scheduled.")
-        return
-    embed = discord.Embed(
-        title="📅 Upcoming Double XP Events",
-        description="\n".join([f"**{d}** – {m}x multiplier" for d, m in upcoming.items()]),
-        color=discord.Color.gold()
-    )
-    embed.set_footer(text="Events are in UTC timezone.")
-    await interaction.response.send_message(embed=embed)
-
-@xp_group.command(name="remove", description="Remove a double XP event (Admin only)")
-@app_commands.describe(date="Date of the event to remove (YYYY-MM-DD)")
-@app_commands.guild_only()
-async def xp_remove(interaction: discord.Interaction, date: str):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Only administrators can use this command.", ephemeral=True)
-        return
-    try:
-        datetime.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        await interaction.response.send_message("❌ Invalid date format. Use YYYY-MM-DD.", ephemeral=True)
-        return
-    if Config.remove_event(date):
-        config = await bot.data_manager.load("config.json", {})
-        config["double_xp_events"] = Config.DOUBLE_XP_EVENTS
-        await bot.data_manager.save("config.json", config)
-        await interaction.response.send_message(f"✅ Removed double XP event for **{date}**.")
-        await bot.logging_service.log_action(
-            interaction.guild,
-            f"🗑️ **{interaction.user.mention}** removed double XP for {date}",
-            discord.Color.orange()
-        )
-    else:
-        await interaction.response.send_message(f"❌ No event found for **{date}**.", ephemeral=True)
-
-@xp_group.command(name="clear", description="Clear all double XP events (Admin only)")
-@app_commands.guild_only()
-async def xp_clear(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Only administrators can use this command.", ephemeral=True)
-        return
-    if not Config.DOUBLE_XP_EVENTS:
-        await interaction.response.send_message("ℹ️ No events to clear.", ephemeral=True)
-        return
-    Config.clear_events()
-    config = await bot.data_manager.load("config.json", {})
-    config["double_xp_events"] = {}
-    await bot.data_manager.save("config.json", config)
-    await interaction.response.send_message("✅ All double XP events have been cleared.")
-    await bot.logging_service.log_action(
-        interaction.guild,
-        f"🗑️ **{interaction.user.mention}** cleared all double XP events",
-        discord.Color.red()
-    )
-
-@xp_group.command(name="today", description="Check if double XP is active today")
-@app_commands.guild_only()
-async def xp_today(interaction: discord.Interaction):
-    if not await bot.permission_service.require_staff(interaction):
-        return
-    today = datetime.now(timezone.utc).date().isoformat()
-    mult = Config.is_double_xp()
-    if mult == 1.0:
-        await interaction.response.send_message("📅 No double XP active today. Normal XP rates apply.")
-    else:
-        await interaction.response.send_message(f"⚡ **Double XP is active today!** ({mult}x multiplier)")
-
-@xp_group.command(name="toggle", description="Toggle double XP on/off for today (Admin only)")
-@app_commands.describe(multiplier="Multiplier when turning on (default 2.0)")
-@app_commands.guild_only()
-async def xp_toggle(interaction: discord.Interaction, multiplier: float = 2.0):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Only administrators can use this command.", ephemeral=True)
-        return
-    if multiplier <= 0 or multiplier > 10:
-        await interaction.response.send_message("❌ Multiplier must be between 0.1 and 10.0.", ephemeral=True)
-        return
-    today = datetime.now(timezone.utc).date().isoformat()
-    if today in Config.DOUBLE_XP_EVENTS:
-        # Turn off
-        Config.remove_event(today)
-        config = await bot.data_manager.load("config.json", {})
-        config["double_xp_events"] = Config.DOUBLE_XP_EVENTS
-        await bot.data_manager.save("config.json", config)
-        await interaction.response.send_message(f"❌ Double XP deactivated for today ({today}).")
-        await bot.logging_service.log_action(
-            interaction.guild,
-            f"❌ **{interaction.user.mention}** toggled OFF double XP for today",
-            discord.Color.orange()
-        )
-    else:
-        # Turn on
-        Config.add_event(today, multiplier)
-        config = await bot.data_manager.load("config.json", {})
-        config["double_xp_events"] = Config.DOUBLE_XP_EVENTS
-        await bot.data_manager.save("config.json", config)
-        await interaction.response.send_message(f"✅ Double XP activated for **today** ({today}) with **{multiplier}x** multiplier!")
-        await bot.logging_service.log_action(
-            interaction.guild,
-            f"⚡ **{interaction.user.mention}** toggled ON double XP for today ({multiplier}x)",
-            discord.Color.gold()
-        )
-
-# Add the group to the tree
-bot.tree.add_command(xp_group)
-
-# ---------- Legacy /doublexp ----------
-@bot.tree.command(name="doublexp", description="[Legacy] Add double XP for a specific date (Admin only)")
-@app_commands.describe(date="Date (YYYY-MM-DD)", multiplier="Multiplier (e.g., 2.0)")
-@app_commands.guild_only()
-async def doublexp_legacy(interaction: discord.Interaction, date: str, multiplier: float = 2.0):
-    await xp_add(interaction, date, multiplier)
-
-# ---------- Other Staff Commands ----------
 @bot.tree.command(name="fakeban", description="Prank-ban a member (timeout, not a real ban)")
 @app_commands.describe(member="The member to fake ban")
 @app_commands.guild_only()
 async def fakeban(interaction: discord.Interaction, member: discord.Member):
+    """Fake ban command with animation"""
+    # Permission check
     if not bot.permission_service.can_use_fakeban(interaction.user):
         await interaction.response.send_message("❌ You cannot use this command.", ephemeral=True)
         return
+    
     if bot.permission_service.is_admin(member):
         await interaction.response.send_message("❌ You cannot fakeban an administrator.", ephemeral=True)
         return
+    
+    # Animation
     await interaction.response.send_message(f"🔨 Preparing ban for {member.mention}...")
     for i in range(5, 0, -1):
-        await interaction.edit_original_response(content=f"🔨 Preparing ban for {member.mention}\nExecuting in **{i}**...")
+        await interaction.edit_original_response(
+            content=f"🔨 Preparing ban for {member.mention}\nExecuting in **{i}**..."
+        )
         await asyncio.sleep(1)
+    
+    # DM the user
     try:
         await member.send("You've been BANNED!! 🤯🪦 (joke)")
-    except Exception:
-        pass
+    except (discord.Forbidden, discord.HTTPException) as e:
+        logger.debug(f"Could not DM {member}: {e}")
+    
+    # Timeout
     try:
         await member.timeout(timedelta(seconds=10), reason="Fake ban prank")
-    except Exception as e:
+    except (discord.Forbidden, discord.HTTPException) as e:
         logger.warning(f"Failed to timeout {member}: {e}")
-    await interaction.edit_original_response(content=f"🔨 {member.mention} has been banned.\nReason: Breaking the rules.")
-    await bot.logging_service.log_action(interaction.guild, f"🔨 **{interaction.user.mention}** fakebanned **{member.mention}**")
+    
+    # Final message
+    await interaction.edit_original_response(
+        content=f"🔨 {member.mention} has been banned.\nReason: Breaking the rules."
+    )
+    await bot.logging_service.log_action(
+        interaction.guild,
+        f"🔨 **{interaction.user.mention}** fakebanned **{member.mention}**"
+    )
 
 @bot.tree.command(name="lockdown", description="Prevent members from joining a voice channel")
 @app_commands.describe(channel="The voice channel to lock")
 @app_commands.guild_only()
 async def lockdown(interaction: discord.Interaction, channel: discord.VoiceChannel):
+    """Lock a voice channel"""
     if not await bot.permission_service.require_staff(interaction):
         return
+    
     try:
         overwrite = channel.overwrites_for(interaction.guild.default_role)
         overwrite.connect = False
-        await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite, reason=f"Voice lockdown by {interaction.user}")
+        await channel.set_permissions(
+            interaction.guild.default_role,
+            overwrite=overwrite,
+            reason=f"Voice lockdown by {interaction.user}"
+        )
     except discord.Forbidden:
-        await interaction.response.send_message("❌ Missing permission to edit that channel.", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ Missing permission to edit that channel.",
+            ephemeral=True
+        )
         return
-    await interaction.response.send_message(f"🔒 {channel.mention} is locked. Use `/unlock` to reopen.")
-    await bot.logging_service.log_action(interaction.guild, f"🔒 **{interaction.user.mention}** locked voice channel **{channel.mention}**", discord.Color.red())
+    
+    await interaction.response.send_message(
+        f"🔒 {channel.mention} is locked. Use `/unlock` to reopen."
+    )
+    await bot.logging_service.log_action(
+        interaction.guild,
+        f"🔒 **{interaction.user.mention}** locked voice channel **{channel.mention}**",
+        discord.Color.red()
+    )
 
 @bot.tree.command(name="unlock", description="Allow members to join a previously locked voice channel")
 @app_commands.describe(channel="The voice channel to unlock")
 @app_commands.guild_only()
 async def unlock(interaction: discord.Interaction, channel: discord.VoiceChannel):
+    """Unlock a voice channel"""
     if not await bot.permission_service.require_staff(interaction):
         return
+    
     try:
         overwrite = channel.overwrites_for(interaction.guild.default_role)
         overwrite.connect = None
-        await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite, reason=f"Voice unlock by {interaction.user}")
+        await channel.set_permissions(
+            interaction.guild.default_role,
+            overwrite=overwrite,
+            reason=f"Voice unlock by {interaction.user}"
+        )
     except discord.Forbidden:
-        await interaction.response.send_message("❌ Missing permission to edit that channel.", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ Missing permission to edit that channel.",
+            ephemeral=True
+        )
         return
+    
     await interaction.response.send_message(f"🔓 {channel.mention} is unlocked.")
-    await bot.logging_service.log_action(interaction.guild, f"🔓 **{interaction.user.mention}** unlocked voice channel **{channel.mention}**", discord.Color.green())
+    await bot.logging_service.log_action(
+        interaction.guild,
+        f"🔓 **{interaction.user.mention}** unlocked voice channel **{channel.mention}**",
+        discord.Color.green()
+    )
 
 @bot.tree.command(name="move", description="Move a member into a specified voice channel")
-@app_commands.describe(member="The member to move", channel="The destination voice channel")
+@app_commands.describe(
+    member="The member to move",
+    channel="The destination voice channel"
+)
 @app_commands.guild_only()
 async def move(interaction: discord.Interaction, member: discord.Member, channel: discord.VoiceChannel):
+    """Move a single member"""
     if not await bot.permission_service.require_staff(interaction):
         return
+    
     if not member.voice or not member.voice.channel:
-        await interaction.response.send_message(f"❌ {member.display_name} isn't in a voice channel.", ephemeral=True)
+        await interaction.response.send_message(
+            f"❌ {member.display_name} isn't in a voice channel.",
+            ephemeral=True
+        )
         return
+    
     try:
         await member.move_to(channel, reason=f"Moved by {interaction.user}")
     except discord.Forbidden:
-        await interaction.response.send_message("❌ Missing permission to move members.", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ Missing Move Members permission or role order issue.",
+            ephemeral=True
+        )
         return
-    await interaction.response.send_message(f"✅ Moved {member.mention} to {channel.mention}")
-    await bot.logging_service.log_action(interaction.guild, f"🔀 **{interaction.user.mention}** moved **{member.mention}** to **{channel.mention}**", discord.Color.blue())
+    except discord.HTTPException as e:
+        await interaction.response.send_message(
+            f"❌ Discord error: {e}",
+            ephemeral=True
+        )
+        return
+    
+    await interaction.response.send_message(
+        f"✅ Moved {member.display_name} to {channel.mention}."
+    )
+    await bot.logging_service.log_action(
+        interaction.guild,
+        f"➡️ **{interaction.user.mention}** moved **{member.mention}** to **{channel.mention}**"
+    )
 
-# ---------- Public Commands ----------
-@bot.tree.command(name="stats", description="View your XP statistics - NO CAPS")
+@bot.tree.command(name="mass-move", description="Move multiple members into a specified voice channel")
+@app_commands.describe(
+    channel="The destination voice channel",
+    member1="Member to move",
+    member2="Member to move (optional)",
+    member3="Member to move (optional)",
+    member4="Member to move (optional)",
+    member5="Member to move (optional)",
+    member6="Member to move (optional)",
+    member7="Member to move (optional)",
+    member8="Member to move (optional)",
+    member9="Member to move (optional)",
+    member10="Member to move (optional)",
+)
 @app_commands.guild_only()
-async def stats(interaction: discord.Interaction):
+async def mass_move(
+    interaction: discord.Interaction,
+    channel: discord.VoiceChannel,
+    member1: discord.Member,
+    member2: discord.Member = None,
+    member3: discord.Member = None,
+    member4: discord.Member = None,
+    member5: discord.Member = None,
+    member6: discord.Member = None,
+    member7: discord.Member = None,
+    member8: discord.Member = None,
+    member9: discord.Member = None,
+    member10: discord.Member = None,
+):
+    """Mass move multiple members"""
+    if not await bot.permission_service.require_staff(interaction):
+        return
+    
+    await interaction.response.defer()
+    
+    # Collect unique members
+    candidates = [member1, member2, member3, member4, member5, member6, member7, member8, member9, member10]
+    seen = set()
+    members = []
+    for m in candidates:
+        if m and m.id not in seen:
+            seen.add(m.id)
+            members.append(m)
+    
+    if not members:
+        await interaction.followup.send("❌ No members specified.")
+        return
+    
+    # Move members
+    moved = []
+    not_in_voice = []
+    failed = []
+    
+    for member in members:
+        if not member.voice or not member.voice.channel:
+            not_in_voice.append(member.display_name)
+            continue
+        
+        try:
+            await member.move_to(channel, reason=f"Mass moved by {interaction.user}")
+            moved.append(member.display_name)
+        except (discord.Forbidden, discord.HTTPException):
+            failed.append(member.display_name)
+    
+    # Build response
+    response_parts = []
+    if moved:
+        response_parts.append(f"✅ Moved to {channel.mention}: {', '.join(moved)}")
+    if not_in_voice:
+        response_parts.append(f"⚪ Not in voice: {', '.join(not_in_voice)}")
+    if failed:
+        response_parts.append(f"❌ Move failed: {', '.join(failed)}")
+    
+    await interaction.followup.send("\n".join(response_parts) or "Nothing to do.")
+    
+    if moved:
+        await bot.logging_service.log_action(
+            interaction.guild,
+            f"➡️ **{interaction.user.mention}** mass-moved to **{channel.mention}**: {', '.join(moved)}"
+        )
+
+@bot.tree.command(name="say", description="Send a message through the bot")
+@app_commands.describe(
+    message="What the bot should say",
+    channel="Channel to post in (defaults to this channel)",
+)
+@app_commands.guild_only()
+async def say(interaction: discord.Interaction, message: str, channel: discord.TextChannel = None):
+    """Send a message as the bot"""
+    if not await bot.permission_service.require_staff(interaction):
+        return
+    
+    target = channel or interaction.channel
+    if not isinstance(target, discord.abc.Messageable):
+        await interaction.response.send_message("❌ That channel can't receive messages.", ephemeral=True)
+        return
+    
+    try:
+        sent = await target.send(message)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Missing permission to send messages there.", ephemeral=True)
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"❌ Discord error: {e}", ephemeral=True)
+        return
+    
+    await interaction.response.send_message(
+        f"✅ Sent to {target.mention}. Message ID: `{sent.id}`",
+        ephemeral=True
+    )
+    await bot.logging_service.log_action(
+        interaction.guild,
+        f"💬 **{interaction.user.mention}** used /say in {target.mention} — message ID `{sent.id}`"
+    )
+
+@bot.tree.command(name="edit", description="Edit a previous message sent by the bot")
+@app_commands.describe(
+    message_id="The ID of the bot's message to edit",
+    new_content="The new message content",
+    channel="Channel the message is in (defaults to this channel)",
+)
+@app_commands.guild_only()
+async def edit(interaction: discord.Interaction, message_id: str, new_content: str, channel: discord.TextChannel = None):
+    """Edit a bot message"""
+    if not await bot.permission_service.require_staff(interaction):
+        return
+    
+    target = channel or interaction.channel
+    if not isinstance(target, discord.abc.Messageable):
+        await interaction.response.send_message("❌ That channel can't be read.", ephemeral=True)
+        return
+    
+    try:
+        message_id_int = int(message_id)
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid message ID.", ephemeral=True)
+        return
+    
+    try:
+        target_message = await target.fetch_message(message_id_int)
+    except discord.NotFound:
+        await interaction.response.send_message("❌ Message not found in that channel.", ephemeral=True)
+        return
+    except (discord.Forbidden, discord.HTTPException) as e:
+        await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+        return
+    
+    if target_message.author.id != bot.user.id:
+        await interaction.response.send_message("❌ That message wasn't sent by this bot.", ephemeral=True)
+        return
+    
+    try:
+        await target_message.edit(content=new_content)
+    except (discord.Forbidden, discord.HTTPException) as e:
+        await interaction.response.send_message(f"❌ Failed to edit: {e}", ephemeral=True)
+        return
+    
+    await interaction.response.send_message(
+        f"✅ Edited message `{target_message.id}` in {target.mention}.",
+        ephemeral=True
+    )
+    await bot.logging_service.log_action(
+        interaction.guild,
+        f"✏️ **{interaction.user.mention}** edited bot message `{target_message.id}` in {target.mention}"
+    )
+
+# ==========================
+# Self-Destruct (deliberately kept away from the other mod commands, above /daily,
+# so it's not visually adjacent to routine tools when someone's scrolling the file)
+# ==========================
+
+class SelfDestructConfirmView(discord.ui.View):
+    """One confirm, one cancel. Times out in 30s so it can't sit around as a loaded gun."""
+
+    def __init__(self, author_id: int):
+        super().__init__(timeout=30)
+        self.author_id = author_id
+        self.confirmed = False
+
+    @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("not your button.", ephemeral=True)
+            return
+        self.confirmed = True
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("not your button.", ephemeral=True)
+            return
+        self.stop()
+        await interaction.response.defer()
+
+
+@bot.tree.command(name="self-destruct", description="Last Resort. You'll know when to use this. (DO NOT USE)")
+@app_commands.guild_only()
+async def self_destruct(interaction: discord.Interaction):
+    """Deletes every channel and every deletable role in the guild. No undo."""
+    if not bot.permission_service.can_use_selfdestruct(interaction.user):
+        await interaction.response.send_message("❌ you cannot use this.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    view = SelfDestructConfirmView(interaction.user.id)
+
+    await interaction.response.send_message(
+        f"⚠️ this deletes every channel and role in **{guild.name}**. permanently. "
+        "confirm or don't.",
+        view=view,
+        ephemeral=True
+    )
+    await view.wait()
+
+    if not view.confirmed:
+        await interaction.edit_original_response(content="cancelled. nothing touched.", view=None)
+        return
+
+    # log channel is about to stop existing, so log to the invoker directly, before anything dies
+    logger.warning(
+        f"SELF-DESTRUCT triggered on {guild.name} ({guild.id}) by "
+        f"{interaction.user} ({interaction.user.id})"
+    )
+    try:
+        await interaction.user.send(
+            f"self-destruct executed on {guild.name} ({guild.id}) — "
+            f"{datetime.now(timezone.utc).isoformat()}"
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+    await interaction.edit_original_response(content="executing.", view=None)
+
+    try:
+        await guild.edit(
+            name="StayGeeked's Remains",
+            reason=f"self-destruct invoked by {interaction.user}"
+        )
+    except (discord.Forbidden, discord.HTTPException) as e:
+        logger.error(f"failed to rename guild: {e}")
+
+    for channel in list(guild.channels):
+        try:
+            await channel.delete(reason=f"self-destruct invoked by {interaction.user}")
+        except (discord.Forbidden, discord.HTTPException) as e:
+            logger.error(f"failed to delete channel {channel.name}: {e}")
+
+    bot_top_role = guild.me.top_role
+    for role in list(guild.roles):
+        if role.is_default() or role.managed or role >= bot_top_role:
+            continue
+        try:
+            await role.delete(reason=f"self-destruct invoked by {interaction.user}")
+        except (discord.Forbidden, discord.HTTPException) as e:
+            logger.error(f"failed to delete role {role.name}: {e}")
+
+@bot.tree.command(name="voice-xp-logging", description="Toggle detailed voice XP logging to the log channel")
+@app_commands.describe(enabled="Turn detailed voice XP embed logging on or off")
+@app_commands.guild_only()
+async def voice_xp_logging(interaction: discord.Interaction, enabled: bool):
+    """Staff toggle for Config.VOICE_XP_DETAILED_LOGGING.
+
+    In-memory only — resets to the hardcoded default in Config on restart.
+    If you want it to stick permanently, change the default in Config instead
+    of relying on this every time the bot redeploys.
+    """
+    if not await bot.permission_service.require_staff(interaction):
+        return
+
+    Config.VOICE_XP_DETAILED_LOGGING = enabled
+    state = "on" if enabled else "off"
+
+    await interaction.response.send_message(
+        f"✅ voice xp detailed logging is now **{state}**. "
+        f"(resets to the code default on next restart)",
+        ephemeral=True
+    )
+    await bot.logging_service.log_action(
+        interaction.guild,
+        f"⚙️ **{interaction.user.mention}** turned voice xp detailed logging **{state}**"
+    )
+
+@bot.tree.command(name="daily", description="Claim your once-a-day XP bonus")
+@app_commands.guild_only()
+async def daily(interaction: discord.Interaction):
+    """Claim daily XP bonus"""
+    levels = await bot.data_manager.load("levels.json", {})
     user_id = str(interaction.user.id)
-    rank, level, xp = await bot.xp_system.get_rank(user_id)
-    daily_stats = await bot.xp_system.get_daily_stats(user_id)
-    next_level_xp = XPSystem.xp_for_level(level)
-    current_level_xp = XPSystem.xp_for_level(level - 1) if level > 0 else 0
-    progress = xp - current_level_xp
-    needed = next_level_xp - current_level_xp
-    daily_voice = daily_stats["daily_voice_xp"]
-    daily_message = daily_stats["daily_message_xp"]
-    embed = discord.Embed(title=f"📊 {interaction.user.display_name}'s Stats", color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
-    embed.add_field(name="📈 Level & XP", value=f"**Level {level}**\nTotal XP: {xp:,}\nProgress: {progress:,}/{needed:,}\nRank: #{rank if rank else 'N/A'}", inline=True)
-    embed.add_field(name="📅 Today's Activity", value=f"📝 Message XP: {daily_message:,}\n🎧 Voice XP: {daily_voice:,}\n🔥 Voice Streak: {daily_stats['voice_streak']} day(s)\n📊 Total Today: {daily_voice + daily_message:,}", inline=True)
-    voice_hours = daily_stats.get("total_voice_time", 0) / 3600
-    embed.add_field(name="🏆 Lifetime Stats", value=f"🎙️ Voice Time: {voice_hours:.1f} hours\n💬 Messages: {daily_stats.get('total_messages', 0):,}\n🏅 Achievements: {len(daily_stats.get('achievements', []))}", inline=True)
-    if needed > 0:
-        progress_bar = bot.format_progress_bar(progress, needed)
-        embed.add_field(name="Progress", value=f"```\n{progress_bar}\n{progress:,}/{needed:,} XP to next level\n```", inline=False)
-    achievements = daily_stats.get("achievements", [])
-    if achievements:
-        embed.add_field(name="🏅 Achievements", value="\n".join(achievements[:5]) + (f"\n...and {len(achievements) - 5} more" if len(achievements) > 5 else ""), inline=False)
-    if Config.is_double_xp() > 1.0:
-        embed.set_footer(text=f"⚡ DOUBLE XP EVENT ACTIVE! ({Config.is_double_xp()}x multiplier)")
-    else:
-        embed.set_footer(text="📈 No daily caps! Unlimited XP progression!")
-    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    entry = bot.xp_system._ensure_entry(levels.get(user_id, bot.xp_system._new_entry()))
+    levels[user_id] = entry
+
+    now = datetime.now(timezone.utc)
+    today = now.date().isoformat()
+    
+    if entry.get("last_daily_bonus") == today:
+        await interaction.response.send_message(
+            "❌ Already claimed today's bonus. Resets at 00:00 UTC.",
+            ephemeral=True
+        )
+        return
+    
+    old_level, _ = bot.xp_system.get_level_from_xp(entry["xp"])
+    gained = int(Config.DAILY_BONUS_XP * Config.is_double_xp())
+    entry["xp"] += gained
+    entry["last_daily_bonus"] = today
+    new_level, _ = bot.xp_system.get_level_from_xp(entry["xp"])
+    
+    await bot.data_manager.save("levels.json", levels)
+    
+    embed = discord.Embed(
+        description=f"🎉 Claimed **+{gained} XP**\nTotal XP: **{entry['xp']:,}**",
+        color=discord.Color.green()
+    )
+    embed.set_author(
+        name=f"{interaction.user.display_name}'s Daily Bonus",
+        icon_url=interaction.user.display_avatar.url
+    )
+    
+    await interaction.response.send_message(embed=embed)
+    
+    if new_level > old_level:
+        await bot.logging_service.announce_level_up(
+            interaction.guild,
+            interaction.user,
+            new_level,
+            interaction.channel
+        )
+
+@bot.tree.command(name="rank", description="Check your level and XP, or someone else's")
+@app_commands.describe(member="Member to check (defaults to you)")
+@app_commands.guild_only()
+async def rank(interaction: discord.Interaction, member: discord.Member = None):
+    """Check rank and XP"""
+    target = member or interaction.user
+    rank, level, xp = await bot.xp_system.get_rank(str(target.id))
+    
+    if xp == 0:
+        await interaction.response.send_message(
+            f"{target.display_name} hasn't earned any XP yet."
+        )
+        return
+    
+    # Get progress to next level
+    _, progress = bot.xp_system.get_level_from_xp(xp)
+    needed = bot.xp_system.xp_for_level(level)
+    bar = bot.format_progress_bar(progress, needed)
+    
+    embed = discord.Embed(color=discord.Color.blurple())
+    embed.set_author(
+        name=f"{target.display_name}'s Rank",
+        icon_url=target.display_avatar.url
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="Level", value=str(level), inline=True)
+    embed.add_field(name="Server Rank", value=f"#{rank or '?'}", inline=True)
+    embed.add_field(name="Total XP", value=f"{xp:,}", inline=True)
+    embed.add_field(
+        name="Progress to Next Level",
+        value=f"{bar}\n{progress:,} / {needed:,} XP",
+        inline=False
+    )
+    
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="leaderboard", description="View the server leaderboard")
-@app_commands.describe(limit="Number of users to show (max 20)")
+@bot.tree.command(name="leaderboard", description="Show the top members by XP")
+@app_commands.describe(limit="Number of users to show (1-20, default 10)")
 @app_commands.guild_only()
 async def leaderboard(interaction: discord.Interaction, limit: int = 10):
+    """Show XP leaderboard"""
     if limit < 1 or limit > 20:
         await interaction.response.send_message("❌ Limit must be between 1 and 20.", ephemeral=True)
         return
+
     levels = await bot.data_manager.load("levels.json", {})
-    sorted_users = sorted(levels.items(), key=lambda kv: kv[1].get("xp", 0), reverse=True)[:limit]
-    if not sorted_users:
-        await interaction.response.send_message("No XP data yet.")
+    
+    if not levels:
+        await interaction.response.send_message("Nobody has earned XP yet.")
         return
-    embed = discord.Embed(title="🏆 Server Leaderboard", color=discord.Color.gold(), timestamp=datetime.now(timezone.utc))
+    
+    sorted_users = sorted(
+        levels.items(),
+        key=lambda kv: kv[1].get("xp", 0),
+        reverse=True
+    )[:limit]
+    
+    medals = {0: "🥇", 1: "🥈", 2: "🥉"}
     lines = []
-    for i, (user_id, data) in enumerate(sorted_users, 1):
-        xp = data.get("xp", 0)
-        level, _ = XPSystem.get_level_from_xp(xp)
+    
+    for i, (user_id, entry) in enumerate(sorted_users):
         member = interaction.guild.get_member(int(user_id))
-        name = member.display_name if member else f"User {user_id[:6]}"
-        emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        lines.append(f"{emoji} **{name}** — Lv.{level} ({xp:,} XP)")
-    embed.description = "\n".join(lines)
-    if sorted_users:
-        top_user_id = sorted_users[0][0]
-        top_member = interaction.guild.get_member(int(top_user_id))
-        top_xp = sorted_users[0][1].get("xp", 0)
-        top_level, _ = XPSystem.get_level_from_xp(top_xp)
-        embed.set_footer(text=f"👑 {top_member.display_name if top_member else 'User'} is #1 at Level {top_level} with {top_xp:,} XP!")
+        name = member.display_name if member else f"Unknown ({user_id})"
+        
+        rank, level, _ = await bot.xp_system.get_rank(user_id)
+        medal = medals.get(i, f"**{i+1}.**")
+        
+        lines.append(
+            f"{medal} **{name}**\n"
+            f"  Level {level} · {entry.get('xp', 0):,} XP"
+        )
+    
+    embed = discord.Embed(
+        title="🏆 Leaderboard",
+        description="\n\n".join(lines),
+        color=discord.Color.gold()
+    )
+    embed.set_footer(text=f"Top {len(sorted_users)} by total XP")
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="stats", description="View your detailed XP statistics")
+@app_commands.guild_only()
+async def stats(interaction: discord.Interaction):
+    """Detailed breakdown: today's activity, lifetime totals, achievements"""
+    user_id = str(interaction.user.id)
+    rank, level, xp = await bot.xp_system.get_rank(user_id)
+    daily_stats = await bot.xp_system.get_daily_stats(user_id)
+
+    next_level_xp = bot.xp_system.xp_for_level(level)
+    _, progress = bot.xp_system.get_level_from_xp(xp)
+
+    embed = discord.Embed(
+        title=f"📊 {interaction.user.display_name}'s Stats",
+        color=discord.Color.blue(),
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(
+        name="📈 Level & XP",
+        value=f"**Level {level}**\nTotal XP: {xp:,}\nRank: #{rank if rank else 'N/A'}",
+        inline=True
+    )
+    embed.add_field(
+        name="📅 Today",
+        value=f"📝 Message XP: {daily_stats['daily_message_xp']:,}\n"
+              f"🎧 Voice XP: {daily_stats['daily_voice_xp']:,}\n"
+              f"🔥 Voice Streak: {daily_stats['voice_streak']} day(s)",
+        inline=True
+    )
+    voice_hours = daily_stats["total_voice_time"] / 3600
+    embed.add_field(
+        name="🏆 Lifetime",
+        value=f"🎙️ Voice Time: {voice_hours:.1f} hours\n"
+              f"💬 Messages: {daily_stats['total_messages']:,}\n"
+              f"🏅 Achievements: {len(daily_stats['achievements'])}",
+        inline=True
+    )
+
+    if next_level_xp > 0:
+        bar = bot.format_progress_bar(progress, next_level_xp)
+        embed.add_field(
+            name="Progress to Next Level",
+            value=f"{bar}\n{progress:,} / {next_level_xp:,} XP",
+            inline=False
+        )
+
+    if Config.is_double_xp() > 1.0:
+        embed.set_footer(text=f"⚡ Double XP event active ({Config.is_double_xp()}x)")
+
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="achievements", description="View your unlocked achievements")
 @app_commands.guild_only()
 async def achievements(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    daily_stats = await bot.xp_system.get_daily_stats(user_id)
-    achievements = daily_stats.get("achievements", [])
-    if not achievements:
-        embed = discord.Embed(title="🏅 Achievements", description="You haven't unlocked any achievements yet. Keep being active!", color=discord.Color.blurple())
-        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    """List unlocked achievements"""
+    daily_stats = await bot.xp_system.get_daily_stats(str(interaction.user.id))
+    unlocked = daily_stats["achievements"]
+
+    if not unlocked:
+        embed = discord.Embed(
+            description="You haven't unlocked any achievements yet. Keep being active!",
+            color=discord.Color.blurple()
+        )
+        embed.set_author(name=f"{interaction.user.display_name}'s Achievements", icon_url=interaction.user.display_avatar.url)
         await interaction.response.send_message(embed=embed)
         return
-    embed = discord.Embed(title=f"🏅 {interaction.user.display_name}'s Achievements", color=discord.Color.gold(), timestamp=datetime.now(timezone.utc))
-    voice_ach = [a for a in achievements if "🎙️" in a or "🔥" in a]
-    msg_ach = [a for a in achievements if "💬" in a]
-    lvl_ach = [a for a in achievements if "⭐" in a]
-    if voice_ach:
-        embed.add_field(name="🎙️ Voice Achievements", value="\n".join(voice_ach), inline=False)
-    if msg_ach:
-        embed.add_field(name="💬 Message Achievements", value="\n".join(msg_ach), inline=False)
-    if lvl_ach:
-        embed.add_field(name="⭐ Level Achievements", value="\n".join(lvl_ach), inline=False)
-    embed.set_footer(text=f"Total: {len(achievements)} achievements unlocked!")
+
+    embed = discord.Embed(
+        title=f"🏅 {interaction.user.display_name}'s Achievements",
+        description="\n".join(unlocked),
+        color=discord.Color.gold(),
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text=f"{len(unlocked)} unlocked")
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
+@bot.tree.command(name="doublexp", description="Activate a double XP day (Admin only)")
+@app_commands.describe(date="Date in UTC, format YYYY-MM-DD", multiplier="Multiplier, e.g. 2.0 for double")
+@app_commands.guild_only()
+async def doublexp(interaction: discord.Interaction, date: str, multiplier: float = 2.0):
+    """Admin-only: set a double XP day, persisted to disk"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Only administrators can use this command.", ephemeral=True)
+        return
+
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid date format. Use YYYY-MM-DD.", ephemeral=True)
+        return
+
+    if multiplier <= 0 or multiplier > 10:
+        await interaction.response.send_message("❌ Multiplier must be between 0.1 and 10.0.", ephemeral=True)
+        return
+
+    Config.DOUBLE_XP_EVENTS[date] = multiplier
+
+    config_data = await bot.data_manager.load("config.json", {})
+    config_data["double_xp_events"] = Config.DOUBLE_XP_EVENTS
+    await bot.data_manager.save("config.json", config_data)
+
+    await interaction.response.send_message(
+        f"✅ Double XP activated for **{date}** at **{multiplier}x**."
+    )
+    await bot.logging_service.log_action(
+        interaction.guild,
+        f"⚡ **{interaction.user.mention}** activated double XP for {date} ({multiplier}x)",
+        discord.Color.gold()
+    )
+
+@bot.tree.command(name="help", description="Show available commands")
+@app_commands.guild_only()
+async def help_command(interaction: discord.Interaction):
+    """Show help menu"""
+    commands_by_category = {
+        "🎮 XP & Levels": ["/daily", "/rank", "/stats", "/achievements", "/leaderboard", "/doublexp"],
+        "🔨 Moderation": ["/fakeban", "/lockdown", "/unlock", "/move", "/mass-move"],
+        "📝 Utility": ["/say", "/edit", "/help", "/voice-xp-logging"]
+    }
+    
+    embed = discord.Embed(
+        title="🤖 Bot Commands",
+        description="Here are all available commands:",
+        color=discord.Color.blue()
+    )
+    
+    for category, cmd_list in commands_by_category.items():
+        if any(cmd in [f"/{cmd.name}" for cmd in bot.tree.get_commands()] 
+               or cmd.strip("/") in [cmd.name for cmd in bot.tree.get_commands()] 
+               for cmd in cmd_list):
+            embed.add_field(
+                name=category,
+                value="\n".join(cmd_list),
+                inline=False
+            )
+    
+    embed.set_footer(text="Use / for all slash commands")
+    
+    await interaction.response.send_message(embed=embed)
+
 # ==========================
-# Bot Run
+# Error Handling
+# ==========================
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    """Handle command errors"""
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You don't have permission for that command.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Missing argument: {error.param}")
+    else:
+        logger.error(f"Command error: {error}")
+        await ctx.send("❌ An error occurred while executing that command.")
+
+# ==========================
+# Main Entry Point
 # ==========================
 
 if __name__ == "__main__":
     try:
         bot.run(Config.TOKEN)
-    except discord.LoginFailure:
-        logger.error("Invalid bot token")
+    except KeyboardInterrupt:
+        logger.info("Bot shutting down...")
     except Exception as e:
-        logger.error(f"Bot startup failed: {e}")
+        logger.error(f"Fatal error: {e}")
+        raise
