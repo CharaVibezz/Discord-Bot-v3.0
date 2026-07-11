@@ -44,6 +44,11 @@ FAKEBAN_ALLOWED_ROLES = [
 ]
 
 
+# Channel where the bot posts a record of every moderation action it takes.
+# Replace with your actual log channel ID.
+LOG_CHANNEL_ID = 1525377874868305940
+
+
 WARNING_FILE = "warnings.json"
 
 
@@ -97,6 +102,33 @@ bot = commands.Bot(
 
 def has_staff_role(member: discord.Member) -> bool:
     return any(role.id in STAFF_ROLES for role in member.roles)
+
+
+
+async def log_action(guild: discord.Guild, description: str, color: discord.Color = discord.Color.blurple()):
+    # single place every command/event routes through to write to the
+    # log channel. if the channel's missing or the bot can't post there,
+    # this fails quietly to the console instead of crashing the command
+    # that called it - a broken log channel shouldn't break moderation.
+
+    channel = guild.get_channel(LOG_CHANNEL_ID)
+
+    if channel is None:
+        print(f"Log channel {LOG_CHANNEL_ID} not found or not cached.")
+        return
+
+    embed = discord.Embed(
+        description=description,
+        color=color,
+        timestamp=discord.utils.utcnow()
+    )
+
+    try:
+        await channel.send(embed=embed)
+    except discord.Forbidden:
+        print("Missing permission to send messages in the log channel.")
+    except discord.HTTPException as e:
+        print(f"Failed to post log message: {e}")
 
 
 
@@ -226,6 +258,11 @@ async def fakeban(interaction: discord.Interaction, member: discord.Member):
         f"{interaction.user} fake banned {member}"
     )
 
+    await log_action(
+        interaction.guild,
+        f"🔨 **{interaction.user.mention}** fakebanned **{member.mention}**"
+    )
+
 
 
 # ==========================
@@ -266,6 +303,12 @@ async def lockdown(interaction: discord.Interaction, channel: discord.VoiceChann
         f"🔒 {channel.mention} is locked. nobody new gets in until someone runs `/unlock`."
     )
 
+    await log_action(
+        interaction.guild,
+        f"🔒 **{interaction.user.mention}** locked voice channel **{channel.mention}**",
+        color=discord.Color.red()
+    )
+
 
 
 @bot.tree.command(name="unlock", description="Allow members to join a previously locked voice channel")
@@ -295,6 +338,12 @@ async def unlock(interaction: discord.Interaction, channel: discord.VoiceChannel
         return
 
     await interaction.response.send_message(f"🔓 {channel.mention} is unlocked.")
+
+    await log_action(
+        interaction.guild,
+        f"🔓 **{interaction.user.mention}** unlocked voice channel **{channel.mention}**",
+        color=discord.Color.green()
+    )
 
 
 
@@ -337,6 +386,11 @@ async def move(interaction: discord.Interaction, member: discord.Member, channel
 
     await interaction.response.send_message(
         f"moved {member.display_name} to {channel.mention}."
+    )
+
+    await log_action(
+        interaction.guild,
+        f"➡️ **{interaction.user.mention}** moved **{member.mention}** to **{channel.mention}**"
     )
 
 
@@ -426,6 +480,13 @@ async def mass_move(
 
     await interaction.followup.send("\n".join(lines))
 
+    if moved:
+        await log_action(
+            interaction.guild,
+            f"➡️ **{interaction.user.mention}** mass-moved to **{channel.mention}**: "
+            + ", ".join(moved)
+        )
+
 
 
 # ==========================
@@ -500,6 +561,13 @@ async def on_message(message):
         await warning.delete(delay=10)
 
 
+        await log_action(
+            message.guild,
+            f"⚠️ warned **{message.author.mention}** for posting in {message.channel.mention}",
+            color=discord.Color.orange()
+        )
+
+
         return
 
 
@@ -531,6 +599,13 @@ async def on_message(message):
 
         print(
             f"Banned {message.author}"
+        )
+
+        await log_action(
+            message.guild,
+            f"🔨 banned **{message.author.mention}** for posting again in "
+            f"{message.channel.mention} after a warning",
+            color=discord.Color.red()
         )
 
 
