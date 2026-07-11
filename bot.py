@@ -84,7 +84,7 @@ VOICE_XP_DIMINISHED_RATE = VOICE_XP_PER_MINUTE / 2
 # Channel for level-up announcements. Set to None to just post in
 # whatever channel triggered the level-up (message xp) or fall back
 # to the log channel (voice xp). Replace with a channel ID to pin it.
-LEVEL_UP_CHANNEL_ID = None
+LEVEL_UP_CHANNEL_ID = 1525392046989246525
 
 
 # ==========================
