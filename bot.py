@@ -7,323 +7,134 @@ import os
 import asyncio
 import random
 
-
 # ==========================
 # Railway Token
 # ==========================
 
 TOKEN = os.getenv("TOKEN")
-
 if TOKEN is None:
     raise ValueError("Missing TOKEN environment variable")
 
-
-# where the json files live. point this at a Railway volume's mount
-# path (e.g. "/data") via the DATA_DIR env var so warnings, levels,
-# and voice sessions survive redeploys. defaults to the working
-# directory for local runs where there's no volume attached.
 DATA_DIR = os.getenv("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
-
 
 # ==========================
 # Configuration
 # ==========================
 
-# Channel where normal users cannot send messages
 TARGET_CHANNEL_ID = 1525220657560817766
 
-
-# Staff roles that bypass restricted channel punishment
-# Replace with your actual role IDs
 STAFF_ROLES = [
     1478214213292785825,
     1478212575908073482,
     1478212776588607670,
 ]
 
-
-# Roles allowed to use !fakeban
-# Replace with your actual role IDs
 FAKEBAN_ALLOWED_ROLES = [
     1478214213292785825,
     1478212575908073482,
     1478212776588607670,
-    1478127021828604075
+    1478127021828604075,
 ]
 
-
-# Channel where the bot posts a record of every moderation action it takes.
-# Replace with your actual log channel ID.
 LOG_CHANNEL_ID = 1525220657560817767
 
-
 WARNING_FILE = os.path.join(DATA_DIR, "warnings.json")
-
-# how long a warning counts against a user before it's stale.
-# posting once, waiting 31 days, posting again = two first offenses,
-# not a ban.
 WARNING_EXPIRY_DAYS = 30
-
-
-# ==========================
-# Leveling System Configuration
-# ==========================
 
 LEVELS_FILE = os.path.join(DATA_DIR, "levels.json")
 
 MESSAGE_XP_MIN = 15
 MESSAGE_XP_MAX = 25
-MESSAGE_XP_COOLDOWN_SECONDS = 60      # per-message xp, once per this window
-DAILY_BONUS_XP = 20                   # claimed via /daily, once per calendar day (UTC)
+MESSAGE_XP_COOLDOWN_SECONDS = 60
+DAILY_BONUS_XP = 20
 
 VOICE_XP_PER_MINUTE = 10
-VOICE_XP_DIMINISH_AFTER_MINUTES = 60  # full rate up to this point in one session
+VOICE_XP_DIMINISH_AFTER_MINUTES = 60
 VOICE_XP_DIMINISHED_RATE = VOICE_XP_PER_MINUTE / 2
 
-# Channel for level-up announcements. Set to None to just post in
-# whatever channel triggered the level-up (message xp) or fall back
-# to the log channel (voice xp). Replace with a channel ID to pin it.
 LEVEL_UP_CHANNEL_ID = 1525392046989246525
 
+# ==========================
+# Helpers
+# ==========================
 
-# ==========================
-# Warning System
-# ==========================
+def safe_load_json(path: str, default):
+    try:
+        if os.path.exists(path):
+            with open(path, "r") as file:
+                return json.load(file)
+    except (json.JSONDecodeError, OSError):
+        pass
+    return default
+
+def safe_save_json(path: str, data):
+    with open(path, "w") as file:
+        json.dump(data, file)
 
 def load_warnings():
-
-    if os.path.exists(WARNING_FILE):
-
-        with open(WARNING_FILE, "r") as file:
-            return json.load(file)
-
-    return {}
-
-
+    return safe_load_json(WARNING_FILE, {})
 
 def save_warnings():
+    safe_save_json(WARNING_FILE, warned_users)
 
-    with open(WARNING_FILE, "w") as file:
-        json.dump(warned_users, file)
-
-
-
-warned_users = load_warnings()  # {user_id: iso timestamp of last warning}
-
-
-
-# ==========================
-# Leveling System
-# ==========================
-# one xp total per user, fed by two sources - messages and voice time.
-# level is derived from total xp on the fly rather than stored
-# separately, so there's only ever one number that can drift out of
-# sync with itself.
+warned_users = load_warnings()
 
 def load_levels() -> dict:
-
-    if os.path.exists(LEVELS_FILE):
-
-        with open(LEVELS_FILE, "r") as file:
-            return json.load(file)
-
-    return {}
-
-
+    return safe_load_json(LEVELS_FILE, {})
 
 def save_levels(levels: dict):
-
-    with open(LEVELS_FILE, "w") as file:
-        json.dump(levels, file)
-
-
+    safe_save_json(LEVELS_FILE, levels)
 
 def xp_for_level(level: int) -> int:
-    # xp required to climb out of `level` into `level + 1`.
-    # same shape MEE6 popularized - quadratic growth so early levels
-    # come fast and later ones cost real time investment.
     return 5 * (level ** 2) + 50 * level + 100
 
-
-
 def get_level_from_xp(total_xp: int):
-    # walks the thresholds rather than solving the quadratic directly -
-    # levels stay low enough in practice that this is cheap, and it
-    # can't drift out of sync with xp_for_level the way a separate
-    # closed-form formula could if one gets tweaked and not the other.
     level = 0
     remaining = total_xp
-
-    while remaining >= xp_for_level(level):
-        remaining -= xp_for_level(level)
+    while True:
+        needed = xp_for_level(level)
+        if remaining < needed:
+            break
+        remaining -= needed
         level += 1
-
-    return level, remaining  # (current level, progress into that level)
-
-
+    return level, remaining
 
 def get_or_create_entry(levels: dict, user_id: str) -> dict:
     return levels.setdefault(
         user_id,
-        {"xp": 0, "last_message_time": None, "last_daily_bonus": None}
+        {"xp": 0, "last_message_time": None, "last_daily_bonus": None},
     )
-
-
 
 def calculate_voice_xp(elapsed_seconds: float) -> int:
     minutes = int(elapsed_seconds // 60)
-
     if minutes <= 0:
         return 0
-
     if minutes <= VOICE_XP_DIMINISH_AFTER_MINUTES:
         return int(minutes * VOICE_XP_PER_MINUTE)
-
     base = VOICE_XP_DIMINISH_AFTER_MINUTES * VOICE_XP_PER_MINUTE
     extra_minutes = minutes - VOICE_XP_DIMINISH_AFTER_MINUTES
-
     return int(base + extra_minutes * VOICE_XP_DIMINISHED_RATE)
 
-
-
-# voice sessions persist to disk now instead of living only in memory -
-# a restart mid-call just keeps reading the same join timestamp instead
-# of losing it. keyed by str(user_id) -> iso timestamp joined, same
-# shape as everything else in this file.
 VOICE_SESSIONS_FILE = os.path.join(DATA_DIR, "voice_sessions.json")
 
-
 def load_voice_sessions() -> dict:
-
-    if os.path.exists(VOICE_SESSIONS_FILE):
-
-        with open(VOICE_SESSIONS_FILE, "r") as file:
-            return json.load(file)
-
-    return {}
-
-
+    return safe_load_json(VOICE_SESSIONS_FILE, {})
 
 def save_voice_sessions(sessions: dict):
-
-    with open(VOICE_SESSIONS_FILE, "w") as file:
-        json.dump(sessions, file)
-
-
+    safe_save_json(VOICE_SESSIONS_FILE, sessions)
 
 voice_sessions = load_voice_sessions()
-
-
-
-async def announce_level_up(guild: discord.Guild, member: discord.Member, new_level: int, fallback_channel=None):
-
-    channel = None
-
-    if LEVEL_UP_CHANNEL_ID:
-        channel = guild.get_channel(LEVEL_UP_CHANNEL_ID)
-
-    if channel is None:
-        channel = fallback_channel or guild.get_channel(LOG_CHANNEL_ID)
-
-    if channel is not None:
-
-        embed = discord.Embed(
-            description=f"{member.mention} just hit **level {new_level}**.",
-            color=discord.Color.gold()
-        )
-        embed.set_author(
-            name=f"{member.display_name} leveled up!",
-            icon_url=member.display_avatar.url
-        )
-        embed.set_thumbnail(url=member.display_avatar.url)
-
-        try:
-            await channel.send(embed=embed)
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-
-    await log_action(
-        guild,
-        f"⬆️ **{member.mention}** leveled up to **level {new_level}**",
-        color=discord.Color.gold()
-    )
-
-
-
-async def award_message_xp(message: discord.Message):
-
-    if message.guild is None:
-        return
-
-    levels = load_levels()
-    user_id = str(message.author.id)
-    entry = get_or_create_entry(levels, user_id)
-
-    now = discord.utils.utcnow()
-
-    on_cooldown = False
-    last_time = entry.get("last_message_time")
-
-    if last_time:
-        last_dt = datetime.fromisoformat(last_time)
-        on_cooldown = (now - last_dt) < timedelta(seconds=MESSAGE_XP_COOLDOWN_SECONDS)
-
-    gained = 0
-
-    if not on_cooldown:
-        gained += random.randint(MESSAGE_XP_MIN, MESSAGE_XP_MAX)
-        entry["last_message_time"] = now.isoformat()
-
-    if gained == 0:
-        return
-
-    old_level, _ = get_level_from_xp(entry["xp"])
-    entry["xp"] += gained
-    new_level, _ = get_level_from_xp(entry["xp"])
-
-    save_levels(levels)
-
-    if new_level > old_level:
-        await announce_level_up(message.guild, message.author, new_level, message.channel)
-
-
-
-# ==========================
-# Discord Setup
-# ==========================
-
-intents = discord.Intents.default()
-
-intents.message_content = True
-intents.members = True
-
-
-bot = commands.Bot(
-    command_prefix="!",
-    intents=intents
-)
-
-
-# ==========================
-# Shared permission check
-# ==========================
-# same staff list the fakeban command uses. one source of truth,
-# not two lists that drift apart over time.
 
 def has_staff_role(member: discord.Member) -> bool:
     return any(role.id in STAFF_ROLES for role in member.roles)
 
-
-
-async def log_action(guild: discord.Guild, description: str, color: discord.Color = discord.Color.blurple()):
-    # single place every command/event routes through to write to the
-    # log channel. if the channel's missing or the bot can't post there,
-    # this fails quietly to the console instead of crashing the command
-    # that called it - a broken log channel shouldn't break moderation.
-
+async def log_action(
+    guild: discord.Guild,
+    description: str,
+    color: discord.Color = discord.Color.blurple(),
+):
     channel = guild.get_channel(LOG_CHANNEL_ID)
-
     if channel is None:
         print(f"Log channel {LOG_CHANNEL_ID} not found or not cached.")
         return
@@ -331,7 +142,7 @@ async def log_action(guild: discord.Guild, description: str, color: discord.Colo
     embed = discord.Embed(
         description=description,
         color=color,
-        timestamp=discord.utils.utcnow()
+        timestamp=discord.utils.utcnow(),
     )
 
     try:
@@ -341,79 +152,125 @@ async def log_action(guild: discord.Guild, description: str, color: discord.Colo
     except discord.HTTPException as e:
         print(f"Failed to post log message: {e}")
 
+async def announce_level_up(
+    guild: discord.Guild,
+    member: discord.Member,
+    new_level: int,
+    fallback_channel=None,
+):
+    channel = guild.get_channel(LEVEL_UP_CHANNEL_ID) if LEVEL_UP_CHANNEL_ID else None
+    if channel is None:
+        channel = fallback_channel or guild.get_channel(LOG_CHANNEL_ID)
 
+    if channel is not None:
+        embed = discord.Embed(
+            description=f"{member.mention} just hit **level {new_level}**.",
+            color=discord.Color.gold(),
+        )
+        embed.set_author(
+            name=f"{member.display_name} leveled up!",
+            icon_url=member.display_avatar.url,
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        try:
+            await channel.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    await log_action(
+        guild,
+        f"⬆️ **{member.mention}** leveled up to **level {new_level}**",
+        color=discord.Color.gold(),
+    )
+
+async def award_message_xp(message: discord.Message):
+    if message.guild is None or message.author.bot:
+        return
+
+    levels = load_levels()
+    user_id = str(message.author.id)
+    entry = get_or_create_entry(levels, user_id)
+
+    now = discord.utils.utcnow()
+    last_time = entry.get("last_message_time")
+    on_cooldown = False
+
+    if last_time:
+        try:
+            last_dt = datetime.fromisoformat(last_time)
+            on_cooldown = (now - last_dt) < timedelta(seconds=MESSAGE_XP_COOLDOWN_SECONDS)
+        except ValueError:
+            on_cooldown = False
+
+    if on_cooldown:
+        return
+
+    gained = random.randint(MESSAGE_XP_MIN, MESSAGE_XP_MAX)
+    entry["last_message_time"] = now.isoformat()
+
+    old_level, _ = get_level_from_xp(entry["xp"])
+    entry["xp"] += gained
+    new_level, _ = get_level_from_xp(entry["xp"])
+    save_levels(levels)
+
+    if new_level > old_level:
+        await announce_level_up(message.guild, message.author, new_level, message.channel)
 
 async def reconcile_voice_sessions():
-    # runs once at startup. two problems, one pass:
-    #
-    # 1. someone joined voice while the bot was fully offline - no join
-    #    event ever fired for them, so there's no session on disk. give
-    #    them one starting now. this undercounts (loses xp for the real
-    #    join-to-startup gap) but never overcounts, which is the safe
-    #    direction to be wrong in.
-    #
-    # 2. someone was mid-session, disconnected while the bot was down,
-    #    and the leave event never fired to settle their xp. we don't
-    #    know when they actually left, so crediting them risks paying
-    #    out for time they weren't even connected. drop the stale
-    #    session uncredited instead of guessing.
-
     now = discord.utils.utcnow()
     active_ids = set()
 
     for guild in bot.guilds:
-
         afk_channel = guild.afk_channel
 
         for channel in guild.voice_channels:
-
             if channel == afk_channel:
                 continue
 
             for member in channel.members:
-
                 if member.bot:
                     continue
-
                 user_id = str(member.id)
                 active_ids.add(user_id)
-
                 if user_id not in voice_sessions:
                     voice_sessions[user_id] = now.isoformat()
 
     stale = [uid for uid in voice_sessions if uid not in active_ids]
-
     for user_id in stale:
         del voice_sessions[user_id]
 
     save_voice_sessions(voice_sessions)
-
     if stale:
         print(f"Dropped {len(stale)} stale voice session(s) from before restart.")
 
-
+def format_progress_bar(progress: int, needed: int, length: int = 12) -> str:
+    filled = int(length * progress / needed) if needed else 0
+    filled = max(0, min(length, filled))
+    return "█" * filled + "░" * (length - filled)
 
 # ==========================
-# Bot Startup
+# Discord Setup
+# ==========================
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ==========================
+# Startup
 # ==========================
 
 startup_complete = False
 
-
 @bot.event
 async def on_ready():
-
     global startup_complete
-
     print("----------------------------")
     print(f"Logged in as {bot.user}")
 
-    # on_ready fires on every reconnect, not just the first connection.
-    # sync and reconcile only need to run once per process - repeating
-    # a global command sync on every reconnect risks hitting discord's
-    # rate limit right when a flaky connection is already the problem.
     if not startup_complete:
-
         try:
             synced = await bot.tree.sync()
             print(f"Synced {len(synced)} slash command(s).")
@@ -421,143 +278,63 @@ async def on_ready():
             print(f"Slash command sync failed: {e}")
 
         await reconcile_voice_sessions()
-
         startup_complete = True
 
     print("Bot is online and running!")
     print("----------------------------")
 
-
-
 # ==========================
-# Fake Ban Command
+# Commands
 # ==========================
-# slash version. interaction.response can only fire once, so the
-# countdown edits go through edit_original_response instead of
-# ctx.send/msg.edit like the prefix version did.
 
 @bot.tree.command(name="fakeban", description="Prank-ban a member (timeout, not a real ban)")
 @app_commands.describe(member="The member to fake ban")
 @app_commands.guild_only()
 async def fakeban(interaction: discord.Interaction, member: discord.Member):
-
-    allowed = any(
-        role.id in FAKEBAN_ALLOWED_ROLES
-        for role in interaction.user.roles
-    )
-
+    allowed = any(role.id in FAKEBAN_ALLOWED_ROLES for role in interaction.user.roles)
     if not allowed:
-        await interaction.response.send_message(
-            "❌ You cannot use this command.", ephemeral=True
-        )
+        await interaction.response.send_message("❌ You cannot use this command.", ephemeral=True)
         return
 
-
-    # Prevent fake banning administrators
     if member.guild_permissions.administrator:
-        await interaction.response.send_message(
-            "❌ You cannot fakeban an administrator.", ephemeral=True
-        )
+        await interaction.response.send_message("❌ You cannot fakeban an administrator.", ephemeral=True)
         return
 
-
-    await interaction.response.send_message(
-        f"🔨 Preparing ban for {member.mention}..."
-    )
-
-
-    # Countdown from 5
+    await interaction.response.send_message(f"🔨 Preparing ban for {member.mention}...")
     for number in range(5, 0, -1):
-
         await interaction.edit_original_response(
-            content=(
-                f"🔨 Preparing ban for {member.mention}\n"
-                f"Executing in **{number}**..."
-            )
+            content=f"🔨 Preparing ban for {member.mention}\nExecuting in **{number}**..."
         )
-
         await asyncio.sleep(1)
 
-
-    # Send fake ban DM
     try:
-
-        await member.send(
-            "You've been BANNED!! 🤯🪦 (joke)"
-        )
-
+        await member.send("You've been BANNED!! 🤯🪦 (joke)")
     except discord.Forbidden:
-
-        print(
-            f"Could not DM {member}. DMs are closed."
-        )
-
+        print(f"Could not DM {member}. DMs are closed.")
     except discord.HTTPException:
+        print("Discord error while sending fakeban DM.")
 
-        print(
-            "Discord error while sending fakeban DM."
-        )
-
-
-    # Timeout user for 10 seconds
     try:
-
-        await member.timeout(
-            timedelta(seconds=10),
-            reason="Fake ban prank"
-        )
-
+        await member.timeout(timedelta(seconds=10), reason="Fake ban prank")
     except discord.Forbidden:
-
-        print(
-            "Cannot timeout user. "
-            "Check Moderate Members permission and role order."
-        )
-
+        print("Cannot timeout user. Check Moderate Members permission and role order.")
     except discord.HTTPException:
+        print("Discord error while timing out user.")
 
-        print(
-            "Discord error while timing out user."
-        )
-
-
-    # Fake ban result
     await interaction.edit_original_response(
-        content=(
-            f"🔨 {member.mention} has been banned.\n"
-            "Reason: Breaking the rules.\n"
-        )
+        content=f"🔨 {member.mention} has been banned.\nReason: Breaking the rules."
     )
-
-
-    print(
-        f"{interaction.user} fake banned {member}"
-    )
-
     await log_action(
         interaction.guild,
-        f"🔨 **{interaction.user.mention}** fakebanned **{member.mention}**"
+        f"🔨 **{interaction.user.mention}** fakebanned **{member.mention}**",
     )
-
-
-
-# ==========================
-# Voice Lockdown Commands
-# ==========================
-# lockdown denies @everyone the Connect permission on the target
-# voice channel. anyone already inside stays inside - this blocks
-# new joins, it doesn't eject people. if you want them out too,
-# that's a different command, ask for it separately.
 
 @bot.tree.command(name="lockdown", description="Prevent members from joining a voice channel")
 @app_commands.describe(channel="The voice channel to lock")
 @app_commands.guild_only()
 async def lockdown(interaction: discord.Interaction, channel: discord.VoiceChannel):
-
     if not has_staff_role(interaction.user):
-        await interaction.response.send_message(
-            "you don't have permission for that.", ephemeral=True
-        )
+        await interaction.response.send_message("you don't have permission for that.", ephemeral=True)
         return
 
     overwrite = channel.overwrites_for(interaction.guild.default_role)
@@ -567,87 +344,67 @@ async def lockdown(interaction: discord.Interaction, channel: discord.VoiceChann
         await channel.set_permissions(
             interaction.guild.default_role,
             overwrite=overwrite,
-            reason=f"Voice lockdown by {interaction.user}"
+            reason=f"Voice lockdown by {interaction.user}",
         )
     except discord.Forbidden:
         await interaction.response.send_message(
             "missing permission to edit that channel. check role order and Manage Channels.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
     await interaction.response.send_message(
         f"🔒 {channel.mention} is locked. nobody new gets in until someone runs `/unlock`."
     )
-
     await log_action(
         interaction.guild,
         f"🔒 **{interaction.user.mention}** locked voice channel **{channel.mention}**",
-        color=discord.Color.red()
+        color=discord.Color.red(),
     )
-
-
 
 @bot.tree.command(name="unlock", description="Allow members to join a previously locked voice channel")
 @app_commands.describe(channel="The voice channel to unlock")
 @app_commands.guild_only()
 async def unlock(interaction: discord.Interaction, channel: discord.VoiceChannel):
-
     if not has_staff_role(interaction.user):
-        await interaction.response.send_message(
-            "you don't have permission for that.", ephemeral=True
-        )
+        await interaction.response.send_message("you don't have permission for that.", ephemeral=True)
         return
 
     overwrite = channel.overwrites_for(interaction.guild.default_role)
-    overwrite.connect = None  # reset to whatever the category/role defaults are, not force True
+    overwrite.connect = None
 
     try:
         await channel.set_permissions(
             interaction.guild.default_role,
             overwrite=overwrite,
-            reason=f"Voice unlock by {interaction.user}"
+            reason=f"Voice unlock by {interaction.user}",
         )
     except discord.Forbidden:
         await interaction.response.send_message(
             "missing permission to edit that channel. check role order and Manage Channels.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
     await interaction.response.send_message(f"🔓 {channel.mention} is unlocked.")
-
     await log_action(
         interaction.guild,
         f"🔓 **{interaction.user.mention}** unlocked voice channel **{channel.mention}**",
-        color=discord.Color.green()
+        color=discord.Color.green(),
     )
-
-
-
-# ==========================
-# Move Member Command
-# ==========================
-# discord.Member and discord.VoiceChannel as parameter types give you
-# a proper picker in the slash command UI - a dropdown searched by
-# username and channel name. more reliable than parsing raw strings,
-# and it's what you actually asked for functionally.
 
 @bot.tree.command(name="move", description="Move a member into a specified voice channel")
 @app_commands.describe(member="The member to move", channel="The destination voice channel")
 @app_commands.guild_only()
 async def move(interaction: discord.Interaction, member: discord.Member, channel: discord.VoiceChannel):
-
     if not has_staff_role(interaction.user):
-        await interaction.response.send_message(
-            "you don't have permission for that.", ephemeral=True
-        )
+        await interaction.response.send_message("you don't have permission for that.", ephemeral=True)
         return
 
     if member.voice is None or member.voice.channel is None:
         await interaction.response.send_message(
             f"{member.display_name} isn't in a voice channel. can't move what isn't there.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
@@ -656,33 +413,18 @@ async def move(interaction: discord.Interaction, member: discord.Member, channel
     except discord.Forbidden:
         await interaction.response.send_message(
             "missing permission to move members. check Move Members and role order.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
     except discord.HTTPException as e:
         await interaction.response.send_message(f"discord rejected that: {e}", ephemeral=True)
         return
 
-    await interaction.response.send_message(
-        f"moved {member.display_name} to {channel.mention}."
-    )
-
+    await interaction.response.send_message(f"moved {member.display_name} to {channel.mention}.")
     await log_action(
         interaction.guild,
-        f"➡️ **{interaction.user.mention}** moved **{member.mention}** to **{channel.mention}**"
+        f"➡️ **{interaction.user.mention}** moved **{member.mention}** to **{channel.mention}**",
     )
-
-
-
-# ==========================
-# Mass Move Command
-# ==========================
-# discord.Member parameters give you a real picker in the slash
-# command UI - searched and selected, not typed. that removes the
-# whole username-resolution problem: no typos, no duplicate display
-# names, no "who did you mean" ambiguity. tradeoff is a hard cap -
-# 10 slots here, all but the first optional. discord allows up to
-# 25 options per command total, so this isn't pushing any limit.
 
 @bot.tree.command(name="mass-move", description="Move multiple members into a specified voice channel")
 @app_commands.describe(
@@ -713,19 +455,13 @@ async def mass_move(
     member9: discord.Member = None,
     member10: discord.Member = None,
 ):
-
     if not has_staff_role(interaction.user):
-        await interaction.response.send_message(
-            "you don't have permission for that.", ephemeral=True
-        )
+        await interaction.response.send_message("you don't have permission for that.", ephemeral=True)
         return
 
     await interaction.response.defer()
 
-    # dedupe by id in case someone gets picked twice across slots
-    candidates = [member1, member2, member3, member4, member5,
-                  member6, member7, member8, member9, member10]
-
+    candidates = [member1, member2, member3, member4, member5, member6, member7, member8, member9, member10]
     seen = set()
     members = []
     for m in candidates:
@@ -738,11 +474,9 @@ async def mass_move(
     failed = []
 
     for member in members:
-
         if member.voice is None or member.voice.channel is None:
             not_in_voice.append(member.display_name)
             continue
-
         try:
             await member.move_to(channel, reason=f"Mass moved by {interaction.user}")
             moved.append(member.display_name)
@@ -750,7 +484,6 @@ async def mass_move(
             failed.append(member.display_name)
 
     lines = []
-
     if moved:
         lines.append(f"✅ moved to {channel.mention}: " + ", ".join(moved))
     if not_in_voice:
@@ -758,79 +491,67 @@ async def mass_move(
     if failed:
         lines.append("❌ move failed (permissions/role order): " + ", ".join(failed))
 
+    if not lines:
+        lines.append("Nothing to do.")
+
     await interaction.followup.send("\n".join(lines))
 
     if moved:
         await log_action(
             interaction.guild,
-            f"➡️ **{interaction.user.mention}** mass-moved to **{channel.mention}**: "
-            + ", ".join(moved)
+            f"➡️ **{interaction.user.mention}** mass-moved to **{channel.mention}**: " + ", ".join(moved),
         )
-
-
-
-# ==========================
-# Say & Edit Commands
-# ==========================
-# message_id comes in as a string, not discord's int option type -
-# snowflakes are 64-bit and can exceed what a JSON number safely
-# round-trips through a client. string in, int() it internally.
 
 @bot.tree.command(name="say", description="Send a message through the bot")
 @app_commands.describe(
     message="What the bot should say",
-    channel="Channel to post in (defaults to this channel)"
+    channel="Channel to post in (defaults to this channel)",
 )
 @app_commands.guild_only()
 async def say(interaction: discord.Interaction, message: str, channel: discord.TextChannel = None):
-
     if not has_staff_role(interaction.user):
-        await interaction.response.send_message(
-            "you don't have permission for that.", ephemeral=True
-        )
+        await interaction.response.send_message("you don't have permission for that.", ephemeral=True)
         return
 
     target_channel = channel or interaction.channel
+    if not isinstance(target_channel, discord.abc.Messageable):
+        await interaction.response.send_message("That channel can't receive messages.", ephemeral=True)
+        return
 
     try:
         sent = await target_channel.send(message)
     except discord.Forbidden:
-        await interaction.response.send_message(
-            "missing permission to send messages there.", ephemeral=True
-        )
+        await interaction.response.send_message("missing permission to send messages there.", ephemeral=True)
         return
     except discord.HTTPException as e:
         await interaction.response.send_message(f"discord rejected that: {e}", ephemeral=True)
         return
 
-    # message id comes back here so it can be handed straight to /edit later
     await interaction.response.send_message(
-        f"sent to {target_channel.mention}. message id: `{sent.id}`", ephemeral=True
+        f"sent to {target_channel.mention}. message id: `{sent.id}`",
+        ephemeral=True,
     )
-
     await log_action(
         interaction.guild,
-        f"💬 **{interaction.user.mention}** used /say in {target_channel.mention} — message id `{sent.id}`"
+        f"💬 **{interaction.user.mention}** used /say in {target_channel.mention} — message id `{sent.id}`",
     )
-
-
 
 @bot.tree.command(name="edit", description="Edit a previous message sent by the bot")
 @app_commands.describe(
     message_id="The ID of the bot's message to edit",
     new_content="The new message content",
-    channel="Channel the message is in (defaults to this channel)"
+    channel="Channel the message is in (defaults to this channel)",
 )
 @app_commands.guild_only()
 async def edit(interaction: discord.Interaction, message_id: str, new_content: str, channel: discord.TextChannel = None):
-
     if not has_staff_role(interaction.user):
-        await interaction.response.send_message(
-            "you don't have permission for that.", ephemeral=True
-        )
+        await interaction.response.send_message("you don't have permission for that.", ephemeral=True)
         return
 
     target_channel = channel or interaction.channel
+    if not isinstance(target_channel, discord.abc.Messageable):
+        await interaction.response.send_message("That channel can't be read here.", ephemeral=True)
+        return
 
     try:
         message_id_int = int(message_id)
@@ -841,216 +562,114 @@ async def edit(interaction: discord.Interaction, message_id: str, new_content: s
     try:
         target_message = await target_channel.fetch_message(message_id_int)
     except discord.NotFound:
-        await interaction.response.send_message(
-            "no message with that id in that channel.", ephemeral=True
-        )
+        await interaction.response.send_message("no message with that id in that channel.", ephemeral=True)
         return
     except discord.Forbidden:
         await interaction.response.send_message(
-            "missing permission to read that channel's message history.", ephemeral=True
+            "missing permission to read that channel's message history.",
+            ephemeral=True,
         )
         return
     except discord.HTTPException as e:
         await interaction.response.send_message(f"discord rejected that: {e}", ephemeral=True)
         return
 
-    if target_message.author.id != bot.user.id:
+    if bot.user is None or target_message.author.id != bot.user.id:
         await interaction.response.send_message(
-            "that message wasn't sent by this bot. can't edit it.", ephemeral=True
+            "that message wasn't sent by this bot. can't edit it.",
+            ephemeral=True,
         )
         return
 
     try:
         await target_message.edit(content=new_content)
     except discord.Forbidden:
-        await interaction.response.send_message(
-            "missing permission to edit that message.", ephemeral=True
-        )
+        await interaction.response.send_message("missing permission to edit that message.", ephemeral=True)
         return
     except discord.HTTPException as e:
         await interaction.response.send_message(f"discord rejected that: {e}", ephemeral=True)
         return
 
     await interaction.response.send_message(
-        f"edited message `{target_message.id}` in {target_channel.mention}.", ephemeral=True
+        f"edited message `{target_message.id}` in {target_channel.mention}.",
+        ephemeral=True,
     )
-
     await log_action(
         interaction.guild,
-        f"✏️ **{interaction.user.mention}** edited bot message `{target_message.id}` in {target_channel.mention}"
+        f"✏️ **{interaction.user.mention}** edited bot message `{target_message.id}` in {target_channel.mention}",
     )
-
-
-
-# ==========================
-# Message Protection System
-# ==========================
 
 @bot.event
 async def on_message(message):
-
-
-    # Ignore bots
-
     if message.author.bot:
         return
 
-
-
-    # Message xp applies everywhere, staff included - runs before the
-    # restricted-channel checks below so it isn't short-circuited by them
-
     await award_message_xp(message)
 
-
-
-    # Ignore staff
-
-    if any(
-        role.id in STAFF_ROLES
-        for role in message.author.roles
-    ):
-
+    if any(role.id in STAFF_ROLES for role in message.author.roles):
         return
-
-
-
-    # Only check restricted channel
 
     if message.channel.id != TARGET_CHANNEL_ID:
-
         return
-
-
 
     user_id = str(message.author.id)
     now = discord.utils.utcnow()
 
-
-
-    # Delete message
-
     try:
-
         await message.delete()
-
     except discord.Forbidden:
-
-        print(
-            "Missing Manage Messages permission."
-        )
-
-
-
-    # Check whether an existing warning is still within the expiry window
+        print("Missing Manage Messages permission.")
 
     last_warned_str = warned_users.get(user_id)
     warning_expired = True
 
     if last_warned_str is not None:
-
-        last_warned_dt = datetime.fromisoformat(last_warned_str)
-        warning_expired = (now - last_warned_dt) > timedelta(days=WARNING_EXPIRY_DAYS)
-
-
-
-    # First offense, or a warning old enough it no longer counts
+        try:
+            last_warned_dt = datetime.fromisoformat(last_warned_str)
+            warning_expired = (now - last_warned_dt) > timedelta(days=WARNING_EXPIRY_DAYS)
+        except ValueError:
+            warning_expired = True
 
     if last_warned_str is None or warning_expired:
-
-
         warned_users[user_id] = now.isoformat()
-
         save_warnings()
-
 
         warning = await message.channel.send(
             f"{message.author.mention} ⚠️ **Warning**\n"
             "Messages are not allowed in this channel.\n"
             "Your next message here will result in a ban."
         )
-
-
         await warning.delete(delay=10)
-
 
         await log_action(
             message.guild,
             f"⚠️ warned **{message.author.mention}** for posting in {message.channel.mention}",
-            color=discord.Color.orange()
+            color=discord.Color.orange(),
         )
-
-
         return
 
-
-
-    # Second offense within the 30-day window
-
     try:
-
-
-        await message.author.ban(
-            reason="Ignored warning and posted again in restricted channel"
-        )
-
-
+        await message.author.ban(reason="Ignored warning and posted again in restricted channel")
         warned_users.pop(user_id, None)
-
         save_warnings()
 
-
-
-        ban_message = await message.channel.send(
-            f"{message.author.mention} has been banned."
-        )
-
-
+        ban_message = await message.channel.send(f"{message.author.mention} has been banned.")
         await ban_message.delete(delay=10)
 
-
-
-        print(
-            f"Banned {message.author}"
-        )
+        print(f"Banned {message.author}")
 
         await log_action(
             message.guild,
-            f"🔨 banned **{message.author.mention}** for posting again in "
-            f"{message.channel.mention} after a warning",
-            color=discord.Color.red()
+            f"🔨 banned **{message.author.mention}** for posting again in {message.channel.mention} after a warning",
+            color=discord.Color.red(),
         )
-
-
-
     except discord.Forbidden:
-
-        print(
-            "Cannot ban user. "
-            "Check Ban Members permission and role order."
-        )
-
-
-
+        print("Cannot ban user. Check Ban Members permission and role order.")
     except Exception as e:
-
-        print(
-            f"Ban error: {e}"
-        )
-
-
-
-# ==========================
-# Voice XP Tracking
-# ==========================
-# a session runs from entering a countable channel to leaving one -
-# switching between two real voice channels doesn't reset the timer,
-# only actually disconnecting (or getting parked in the afk channel)
-# does. xp is settled once, when the session ends.
+        print(f"Ban error: {e}")
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-
     if member.bot:
         return
 
@@ -1062,26 +681,23 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
     now = discord.utils.utcnow()
 
-
-    # entered a countable channel from nowhere/afk - start the clock
-
     if after_counts and not before_counts:
         voice_sessions[str(member.id)] = now.isoformat()
         save_voice_sessions(voice_sessions)
         return
 
-
-    # left a countable channel (disconnected, or moved into afk) - settle up
-
     if before_counts and not after_counts:
-
         started_str = voice_sessions.pop(str(member.id), None)
         save_voice_sessions(voice_sessions)
 
         if started_str is None:
             return
 
-        started = datetime.fromisoformat(started_str)
+        try:
+            started = datetime.fromisoformat(started_str)
+        except ValueError:
+            return
+
         elapsed_seconds = (now - started).total_seconds()
         xp_gained = calculate_voice_xp(elapsed_seconds)
 
@@ -1095,31 +711,14 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         old_level, _ = get_level_from_xp(entry["xp"])
         entry["xp"] += xp_gained
         new_level, _ = get_level_from_xp(entry["xp"])
-
         save_levels(levels)
 
         if new_level > old_level:
             await announce_level_up(guild, member, new_level)
 
-
-
-# ==========================
-# Daily, Rank & Leaderboard Commands
-# ==========================
-
-def format_progress_bar(progress: int, needed: int, length: int = 12) -> str:
-
-    filled = int(length * progress / needed) if needed else 0
-    filled = max(0, min(length, filled))
-
-    return "█" * filled + "░" * (length - filled)
-
-
-
 @bot.tree.command(name="daily", description="Claim your once-a-day XP bonus")
 @app_commands.guild_only()
 async def daily(interaction: discord.Interaction):
-
     levels = load_levels()
     user_id = str(interaction.user.id)
     entry = get_or_create_entry(levels, user_id)
@@ -1130,7 +729,7 @@ async def daily(interaction: discord.Interaction):
     if entry.get("last_daily_bonus") == today:
         await interaction.response.send_message(
             "already claimed today's bonus. resets at 00:00 UTC.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
@@ -1138,16 +737,15 @@ async def daily(interaction: discord.Interaction):
     entry["xp"] += DAILY_BONUS_XP
     entry["last_daily_bonus"] = today
     new_level, _ = get_level_from_xp(entry["xp"])
-
     save_levels(levels)
 
     embed = discord.Embed(
         description=f"claimed **+{DAILY_BONUS_XP} xp**\ntotal xp: **{entry['xp']:,}**",
-        color=discord.Color.green()
+        color=discord.Color.green(),
     )
     embed.set_author(
         name=f"{interaction.user.display_name}'s daily bonus",
-        icon_url=interaction.user.display_avatar.url
+        icon_url=interaction.user.display_avatar.url,
     )
 
     await interaction.response.send_message(embed=embed)
@@ -1155,21 +753,16 @@ async def daily(interaction: discord.Interaction):
     if new_level > old_level:
         await announce_level_up(interaction.guild, interaction.user, new_level, interaction.channel)
 
-
-
 @bot.tree.command(name="rank", description="Check your level and XP, or someone else's")
 @app_commands.describe(member="Member to check (defaults to you)")
 @app_commands.guild_only()
 async def rank(interaction: discord.Interaction, member: discord.Member = None):
-
     target = member or interaction.user
     levels = load_levels()
     entry = levels.get(str(target.id))
 
     if entry is None or entry.get("xp", 0) == 0:
-        await interaction.response.send_message(
-            f"{target.display_name} hasn't earned any xp yet."
-        )
+        await interaction.response.send_message(f"{target.display_name} hasn't earned any xp yet.")
         return
 
     xp = entry["xp"]
@@ -1179,36 +772,28 @@ async def rank(interaction: discord.Interaction, member: discord.Member = None):
     sorted_users = sorted(levels.items(), key=lambda kv: kv[1].get("xp", 0), reverse=True)
     rank_position = next(
         (i for i, (uid, _) in enumerate(sorted_users, start=1) if uid == str(target.id)),
-        None
+        None,
     )
 
     bar = format_progress_bar(progress, needed)
 
-    embed = discord.Embed(
-        color=discord.Color.blurple()
-    )
-    embed.set_author(
-        name=f"{target.display_name}'s rank",
-        icon_url=target.display_avatar.url
-    )
+    embed = discord.Embed(color=discord.Color.blurple())
+    embed.set_author(name=f"{target.display_name}'s rank", icon_url=target.display_avatar.url)
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="Level", value=str(level), inline=True)
-    embed.add_field(name="Server Rank", value=f"#{rank_position}", inline=True)
+    embed.add_field(name="Server Rank", value=f"#{rank_position or '?'}", inline=True)
     embed.add_field(name="Total XP", value=f"{xp:,}", inline=True)
     embed.add_field(
         name="Progress to Next Level",
         value=f"{bar}\n{progress:,} / {needed:,} xp",
-        inline=False
+        inline=False,
     )
 
     await interaction.response.send_message(embed=embed)
 
-
-
 @bot.tree.command(name="leaderboard", description="Show the top members by XP")
 @app_commands.guild_only()
 async def leaderboard(interaction: discord.Interaction):
-
     levels = load_levels()
     sorted_users = sorted(levels.items(), key=lambda kv: kv[1].get("xp", 0), reverse=True)
     top = sorted_users[:10]
@@ -1221,24 +806,20 @@ async def leaderboard(interaction: discord.Interaction):
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
 
     for i, (user_id, entry) in enumerate(top, start=1):
-
         member = interaction.guild.get_member(int(user_id))
         name = member.display_name if member else f"unknown user ({user_id})"
         level, _ = get_level_from_xp(entry.get("xp", 0))
         rank_marker = medals.get(i, f"**{i}.**")
-
-        lines.append(f"{rank_marker}  **{name}**\nLevel {level}  ·  {entry.get('xp', 0):,} xp")
+        lines.append(f"{rank_marker} **{name}**\nLevel {level} · {entry.get('xp', 0):,} xp")
 
     embed = discord.Embed(
         title="🏆 Leaderboard",
         description="\n\n".join(lines),
-        color=discord.Color.gold()
+        color=discord.Color.gold(),
     )
     embed.set_footer(text=f"Top {len(top)} by total XP")
 
     await interaction.response.send_message(embed=embed)
-
-
 
 # ==========================
 # Start Bot
