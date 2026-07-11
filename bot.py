@@ -29,7 +29,7 @@ class Config:
     
     # Channel IDs - UPDATE THESE WITH CORRECT IDs!
     TARGET_CHANNEL_ID = 1525220657560817766
-    LOG_CHANNEL_ID = 1525377874868305940  # ← THIS IS THE PROBLEM
+    LOG_CHANNEL_ID = 1525377874868305940
     LEVEL_UP_CHANNEL_ID = 1525392046989246525
     
     # Role IDs
@@ -45,9 +45,13 @@ class Config:
     # bigger blast radius than a prank timeout. Left empty on purpose: an empty
     # whitelist means the command is inert until someone explicitly staffs it.
     SELFDESTRUCT_ALLOWED_ROLES = {
-        1525540205761794213
-        # add the specific role id(s) you trust with this
+        1478210342524944447,
+        1478238526330900552
     }
+
+    # role sync: anyone holding VERIFIED_ROLE_ID has UNVERIFIED_ROLE_ID stripped
+    VERIFIED_ROLE_ID = 1478213211307380838
+    UNVERIFIED_ROLE_ID = 1478213220408889384
     
     # XP Settings
     MESSAGE_XP_MIN = 15
@@ -439,6 +443,7 @@ class ModBot(commands.Bot):
         """Setup hook - runs before bot starts"""
         # Start background tasks (event loop is running)
         self.voice_cleanup.start()
+        self.verified_role_sweep.start()
         
         # Sync slash commands
         try:
@@ -468,6 +473,53 @@ class ModBot(commands.Bot):
                 logger.warning(f"Invalid timestamp for voice session {user_id}")
         
         logger.info(f"Bot is online in {len(self.guilds)} guilds")
+
+        # catch anyone who already holds both roles — role changes made while the
+        # bot was offline don't fire on_member_update, so this is the safety net
+        for guild in self.guilds:
+            await self.sweep_verified_roles(guild)
+
+    async def sync_verified_role(self, member: discord.Member) -> bool:
+        """Strip the unverified role from a member who holds the verified role.
+        Returns True if a role was actually removed."""
+        if not Config.VERIFIED_ROLE_ID or not Config.UNVERIFIED_ROLE_ID:
+            return False  # not configured — no-op rather than guessing at IDs
+
+        role_ids = {r.id for r in member.roles}
+        if Config.VERIFIED_ROLE_ID not in role_ids or Config.UNVERIFIED_ROLE_ID not in role_ids:
+            return False
+
+        unverified_role = member.guild.get_role(Config.UNVERIFIED_ROLE_ID)
+        if not unverified_role:
+            logger.warning(f"unverified role {Config.UNVERIFIED_ROLE_ID} not found in {member.guild.name}")
+            return False
+
+        try:
+            await member.remove_roles(unverified_role, reason="Verified role present — removing unverified")
+        except (discord.Forbidden, discord.HTTPException) as e:
+            logger.error(f"failed to remove unverified role from {member}: {e}")
+            return False
+
+        logger.info(f"removed unverified from {member} ({member.id}) in {member.guild.name}")
+        return True
+
+    async def sweep_verified_roles(self, guild: discord.Guild):
+        """Check every member for the verified+unverified overlap. Run on startup
+        and periodically as a safety net for anything on_member_update missed."""
+        if not Config.VERIFIED_ROLE_ID or not Config.UNVERIFIED_ROLE_ID:
+            return
+
+        verified_role = guild.get_role(Config.VERIFIED_ROLE_ID)
+        if not verified_role:
+            return
+
+        cleaned = 0
+        for member in verified_role.members:
+            if await self.sync_verified_role(member):
+                cleaned += 1
+
+        if cleaned:
+            logger.info(f"verified-role sweep cleaned {cleaned} member(s) in {guild.name}")
     
     def format_progress_bar(self, progress: int, needed: int, length: int = 12) -> str:
         """Format a progress bar"""
@@ -517,6 +569,25 @@ class ModBot(commands.Bot):
     @voice_cleanup.before_loop
     async def before_voice_cleanup(self):
         """Wait for bot to be ready before starting the loop"""
+        await self.wait_until_ready()
+
+    # ==========================
+    # Verified Role Sweep Task
+    # ==========================
+
+    @tasks.loop(minutes=10)
+    async def verified_role_sweep(self):
+        """Periodic safety net — catches anything on_member_update missed
+        (role added via external tool, audit gaps, etc)."""
+        try:
+            await self.wait_until_ready()
+            for guild in self.guilds:
+                await self.sweep_verified_roles(guild)
+        except Exception as e:
+            logger.error(f"verified role sweep failed: {e}")
+
+    @verified_role_sweep.before_loop
+    async def before_verified_role_sweep(self):
         await self.wait_until_ready()
 
 # ==========================
@@ -621,6 +692,32 @@ async def handle_forbidden_message(message: discord.Message):
         logger.warning(f"Cannot ban {message.author} - missing permissions")
     except Exception as e:
         logger.error(f"Ban error: {e}")
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """Catch role changes — specifically, verified being granted while
+    unverified is still present."""
+    if before.roles == after.roles:
+        return  # something else changed (nickname, etc), not our concern
+
+    before_ids = {r.id for r in before.roles}
+    after_ids = {r.id for r in after.roles}
+
+    verified_just_added = (
+        Config.VERIFIED_ROLE_ID in after_ids and Config.VERIFIED_ROLE_ID not in before_ids
+    )
+    verified_already_present = Config.VERIFIED_ROLE_ID in after_ids
+
+    if not verified_already_present:
+        return
+
+    if await bot.sync_verified_role(after):
+        await bot.logging_service.log_action(
+            after.guild,
+            f"✅ **{after.mention}** was verified — removed unverified role"
+            + (" (granted this update)" if verified_just_added else ""),
+            discord.Color.green()
+        )
 
 @bot.event
 async def on_voice_state_update(
