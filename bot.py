@@ -1,10 +1,11 @@
-from datetime import timedelta
+from datetime import timedelta, datetime
 import discord
 from discord import app_commands
 from discord.ext import commands
 import json
 import os
 import asyncio
+import random
 
 
 # ==========================
@@ -15,6 +16,14 @@ TOKEN = os.getenv("TOKEN")
 
 if TOKEN is None:
     raise ValueError("Missing TOKEN environment variable")
+
+
+# where the json files live. point this at a Railway volume's mount
+# path (e.g. "/data") via the DATA_DIR env var so warnings, levels,
+# and voice sessions survive redeploys. defaults to the working
+# directory for local runs where there's no volume attached.
+DATA_DIR = os.getenv("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
 
 
 # ==========================
@@ -49,7 +58,33 @@ FAKEBAN_ALLOWED_ROLES = [
 LOG_CHANNEL_ID = 1525377874868305940
 
 
-WARNING_FILE = "warnings.json"
+WARNING_FILE = os.path.join(DATA_DIR, "warnings.json")
+
+# how long a warning counts against a user before it's stale.
+# posting once, waiting 31 days, posting again = two first offenses,
+# not a ban.
+WARNING_EXPIRY_DAYS = 30
+
+
+# ==========================
+# Leveling System Configuration
+# ==========================
+
+LEVELS_FILE = os.path.join(DATA_DIR, "levels.json")
+
+MESSAGE_XP_MIN = 15
+MESSAGE_XP_MAX = 25
+MESSAGE_XP_COOLDOWN_SECONDS = 60      # per-message xp, once per this window
+DAILY_MESSAGE_BONUS_XP = 20           # separate from cooldown - once per calendar day
+
+VOICE_XP_PER_MINUTE = 10
+VOICE_XP_DIMINISH_AFTER_MINUTES = 60  # full rate up to this point in one session
+VOICE_XP_DIMINISHED_RATE = VOICE_XP_PER_MINUTE / 2
+
+# Channel for level-up announcements. Set to None to just post in
+# whatever channel triggered the level-up (message xp) or fall back
+# to the log channel (voice xp). Replace with a channel ID to pin it.
+LEVEL_UP_CHANNEL_ID = 1478968552353562816
 
 
 # ==========================
@@ -61,20 +96,191 @@ def load_warnings():
     if os.path.exists(WARNING_FILE):
 
         with open(WARNING_FILE, "r") as file:
-            return set(json.load(file))
+            return json.load(file)
 
-    return set()
+    return {}
 
 
 
 def save_warnings():
 
     with open(WARNING_FILE, "w") as file:
-        json.dump(list(warned_users), file)
+        json.dump(warned_users, file)
 
 
 
-warned_users = load_warnings()
+warned_users = load_warnings()  # {user_id: iso timestamp of last warning}
+
+
+
+# ==========================
+# Leveling System
+# ==========================
+# one xp total per user, fed by two sources - messages and voice time.
+# level is derived from total xp on the fly rather than stored
+# separately, so there's only ever one number that can drift out of
+# sync with itself.
+
+def load_levels() -> dict:
+
+    if os.path.exists(LEVELS_FILE):
+
+        with open(LEVELS_FILE, "r") as file:
+            return json.load(file)
+
+    return {}
+
+
+
+def save_levels(levels: dict):
+
+    with open(LEVELS_FILE, "w") as file:
+        json.dump(levels, file)
+
+
+
+def xp_for_level(level: int) -> int:
+    # xp required to climb out of `level` into `level + 1`.
+    # same shape MEE6 popularized - quadratic growth so early levels
+    # come fast and later ones cost real time investment.
+    return 5 * (level ** 2) + 50 * level + 100
+
+
+
+def get_level_from_xp(total_xp: int):
+    # walks the thresholds rather than solving the quadratic directly -
+    # levels stay low enough in practice that this is cheap, and it
+    # can't drift out of sync with xp_for_level the way a separate
+    # closed-form formula could if one gets tweaked and not the other.
+    level = 0
+    remaining = total_xp
+
+    while remaining >= xp_for_level(level):
+        remaining -= xp_for_level(level)
+        level += 1
+
+    return level, remaining  # (current level, progress into that level)
+
+
+
+def get_or_create_entry(levels: dict, user_id: str) -> dict:
+    return levels.setdefault(
+        user_id,
+        {"xp": 0, "last_message_time": None, "last_daily_bonus": None}
+    )
+
+
+
+def calculate_voice_xp(elapsed_seconds: float) -> int:
+    minutes = int(elapsed_seconds // 60)
+
+    if minutes <= 0:
+        return 0
+
+    if minutes <= VOICE_XP_DIMINISH_AFTER_MINUTES:
+        return int(minutes * VOICE_XP_PER_MINUTE)
+
+    base = VOICE_XP_DIMINISH_AFTER_MINUTES * VOICE_XP_PER_MINUTE
+    extra_minutes = minutes - VOICE_XP_DIMINISH_AFTER_MINUTES
+
+    return int(base + extra_minutes * VOICE_XP_DIMINISHED_RATE)
+
+
+
+# voice sessions persist to disk now instead of living only in memory -
+# a restart mid-call just keeps reading the same join timestamp instead
+# of losing it. keyed by str(user_id) -> iso timestamp joined, same
+# shape as everything else in this file.
+VOICE_SESSIONS_FILE = os.path.join(DATA_DIR, "voice_sessions.json")
+
+
+def load_voice_sessions() -> dict:
+
+    if os.path.exists(VOICE_SESSIONS_FILE):
+
+        with open(VOICE_SESSIONS_FILE, "r") as file:
+            return json.load(file)
+
+    return {}
+
+
+
+def save_voice_sessions(sessions: dict):
+
+    with open(VOICE_SESSIONS_FILE, "w") as file:
+        json.dump(sessions, file)
+
+
+
+voice_sessions = load_voice_sessions()
+
+
+
+async def announce_level_up(guild: discord.Guild, member: discord.Member, new_level: int, fallback_channel=None):
+
+    channel = None
+
+    if LEVEL_UP_CHANNEL_ID:
+        channel = guild.get_channel(LEVEL_UP_CHANNEL_ID)
+
+    if channel is None:
+        channel = fallback_channel or guild.get_channel(LOG_CHANNEL_ID)
+
+    if channel is not None:
+        try:
+            await channel.send(f"🎉 {member.mention} just hit **level {new_level}**.")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    await log_action(
+        guild,
+        f"⬆️ **{member.mention}** leveled up to **level {new_level}**",
+        color=discord.Color.gold()
+    )
+
+
+
+async def award_message_xp(message: discord.Message):
+
+    if message.guild is None:
+        return
+
+    levels = load_levels()
+    user_id = str(message.author.id)
+    entry = get_or_create_entry(levels, user_id)
+
+    now = discord.utils.utcnow()
+
+    on_cooldown = False
+    last_time = entry.get("last_message_time")
+
+    if last_time:
+        last_dt = datetime.fromisoformat(last_time)
+        on_cooldown = (now - last_dt) < timedelta(seconds=MESSAGE_XP_COOLDOWN_SECONDS)
+
+    gained = 0
+
+    if not on_cooldown:
+        gained += random.randint(MESSAGE_XP_MIN, MESSAGE_XP_MAX)
+        entry["last_message_time"] = now.isoformat()
+
+    today = now.date().isoformat()
+
+    if entry.get("last_daily_bonus") != today:
+        gained += DAILY_MESSAGE_BONUS_XP
+        entry["last_daily_bonus"] = today
+
+    if gained == 0:
+        return
+
+    old_level, _ = get_level_from_xp(entry["xp"])
+    entry["xp"] += gained
+    new_level, _ = get_level_from_xp(entry["xp"])
+
+    save_levels(levels)
+
+    if new_level > old_level:
+        await announce_level_up(message.guild, message.author, new_level, message.channel)
 
 
 
@@ -132,22 +338,86 @@ async def log_action(guild: discord.Guild, description: str, color: discord.Colo
 
 
 
+async def reconcile_voice_sessions():
+    # runs once at startup. two problems, one pass:
+    #
+    # 1. someone joined voice while the bot was fully offline - no join
+    #    event ever fired for them, so there's no session on disk. give
+    #    them one starting now. this undercounts (loses xp for the real
+    #    join-to-startup gap) but never overcounts, which is the safe
+    #    direction to be wrong in.
+    #
+    # 2. someone was mid-session, disconnected while the bot was down,
+    #    and the leave event never fired to settle their xp. we don't
+    #    know when they actually left, so crediting them risks paying
+    #    out for time they weren't even connected. drop the stale
+    #    session uncredited instead of guessing.
+
+    now = discord.utils.utcnow()
+    active_ids = set()
+
+    for guild in bot.guilds:
+
+        afk_channel = guild.afk_channel
+
+        for channel in guild.voice_channels:
+
+            if channel == afk_channel:
+                continue
+
+            for member in channel.members:
+
+                if member.bot:
+                    continue
+
+                user_id = str(member.id)
+                active_ids.add(user_id)
+
+                if user_id not in voice_sessions:
+                    voice_sessions[user_id] = now.isoformat()
+
+    stale = [uid for uid in voice_sessions if uid not in active_ids]
+
+    for user_id in stale:
+        del voice_sessions[user_id]
+
+    save_voice_sessions(voice_sessions)
+
+    if stale:
+        print(f"Dropped {len(stale)} stale voice session(s) from before restart.")
+
+
+
 # ==========================
 # Bot Startup
 # ==========================
 
+startup_complete = False
+
+
 @bot.event
 async def on_ready():
 
+    global startup_complete
+
     print("----------------------------")
     print(f"Logged in as {bot.user}")
-    print("Bot is online and running!")
 
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} slash command(s).")
-    except Exception as e:
-        print(f"Slash command sync failed: {e}")
+    # on_ready fires on every reconnect, not just the first connection.
+    # sync and reconcile only need to run once per process - repeating
+    # a global command sync on every reconnect risks hitting discord's
+    # rate limit right when a flaky connection is already the problem.
+    if not startup_complete:
+
+        try:
+            synced = await bot.tree.sync()
+            print(f"Synced {len(synced)} slash command(s).")
+        except Exception as e:
+            print(f"Slash command sync failed: {e}")
+
+        await reconcile_voice_sessions()
+
+        startup_complete = True
 
     print("Bot is online and running!")
     print("----------------------------")
@@ -163,6 +433,7 @@ async def on_ready():
 
 @bot.tree.command(name="fakeban", description="Prank-ban a member (timeout, not a real ban)")
 @app_commands.describe(member="The member to fake ban")
+@app_commands.guild_only()
 async def fakeban(interaction: discord.Interaction, member: discord.Member):
 
     allowed = any(
@@ -275,6 +546,7 @@ async def fakeban(interaction: discord.Interaction, member: discord.Member):
 
 @bot.tree.command(name="lockdown", description="Prevent members from joining a voice channel")
 @app_commands.describe(channel="The voice channel to lock")
+@app_commands.guild_only()
 async def lockdown(interaction: discord.Interaction, channel: discord.VoiceChannel):
 
     if not has_staff_role(interaction.user):
@@ -313,6 +585,7 @@ async def lockdown(interaction: discord.Interaction, channel: discord.VoiceChann
 
 @bot.tree.command(name="unlock", description="Allow members to join a previously locked voice channel")
 @app_commands.describe(channel="The voice channel to unlock")
+@app_commands.guild_only()
 async def unlock(interaction: discord.Interaction, channel: discord.VoiceChannel):
 
     if not has_staff_role(interaction.user):
@@ -357,6 +630,7 @@ async def unlock(interaction: discord.Interaction, channel: discord.VoiceChannel
 
 @bot.tree.command(name="move", description="Move a member into a specified voice channel")
 @app_commands.describe(member="The member to move", channel="The destination voice channel")
+@app_commands.guild_only()
 async def move(interaction: discord.Interaction, member: discord.Member, channel: discord.VoiceChannel):
 
     if not has_staff_role(interaction.user):
@@ -419,6 +693,7 @@ async def move(interaction: discord.Interaction, member: discord.Member, channel
     member9="Member to move (optional)",
     member10="Member to move (optional)",
 )
+@app_commands.guild_only()
 async def mass_move(
     interaction: discord.Interaction,
     channel: discord.VoiceChannel,
@@ -504,6 +779,13 @@ async def on_message(message):
 
 
 
+    # Message xp applies everywhere, staff included - runs before the
+    # restricted-channel checks below so it isn't short-circuited by them
+
+    await award_message_xp(message)
+
+
+
     # Ignore staff
 
     if any(
@@ -524,6 +806,7 @@ async def on_message(message):
 
 
     user_id = str(message.author.id)
+    now = discord.utils.utcnow()
 
 
 
@@ -541,12 +824,24 @@ async def on_message(message):
 
 
 
-    # First offense
+    # Check whether an existing warning is still within the expiry window
 
-    if user_id not in warned_users:
+    last_warned_str = warned_users.get(user_id)
+    warning_expired = True
+
+    if last_warned_str is not None:
+
+        last_warned_dt = datetime.fromisoformat(last_warned_str)
+        warning_expired = (now - last_warned_dt) > timedelta(days=WARNING_EXPIRY_DAYS)
 
 
-        warned_users.add(user_id)
+
+    # First offense, or a warning old enough it no longer counts
+
+    if last_warned_str is None or warning_expired:
+
+
+        warned_users[user_id] = now.isoformat()
 
         save_warnings()
 
@@ -572,7 +867,7 @@ async def on_message(message):
 
 
 
-    # Second offense
+    # Second offense within the 30-day window
 
     try:
 
@@ -582,7 +877,7 @@ async def on_message(message):
         )
 
 
-        warned_users.discard(user_id)
+        warned_users.pop(user_id, None)
 
         save_warnings()
 
@@ -624,6 +919,156 @@ async def on_message(message):
         print(
             f"Ban error: {e}"
         )
+
+
+
+# ==========================
+# Voice XP Tracking
+# ==========================
+# a session runs from entering a countable channel to leaving one -
+# switching between two real voice channels doesn't reset the timer,
+# only actually disconnecting (or getting parked in the afk channel)
+# does. xp is settled once, when the session ends.
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+
+    if member.bot:
+        return
+
+    guild = member.guild
+    afk_channel = guild.afk_channel
+
+    before_counts = before.channel is not None and before.channel != afk_channel
+    after_counts = after.channel is not None and after.channel != afk_channel
+
+    now = discord.utils.utcnow()
+
+
+    # entered a countable channel from nowhere/afk - start the clock
+
+    if after_counts and not before_counts:
+        voice_sessions[str(member.id)] = now.isoformat()
+        save_voice_sessions(voice_sessions)
+        return
+
+
+    # left a countable channel (disconnected, or moved into afk) - settle up
+
+    if before_counts and not after_counts:
+
+        started_str = voice_sessions.pop(str(member.id), None)
+        save_voice_sessions(voice_sessions)
+
+        if started_str is None:
+            return
+
+        started = datetime.fromisoformat(started_str)
+        elapsed_seconds = (now - started).total_seconds()
+        xp_gained = calculate_voice_xp(elapsed_seconds)
+
+        if xp_gained <= 0:
+            return
+
+        levels = load_levels()
+        user_id = str(member.id)
+        entry = get_or_create_entry(levels, user_id)
+
+        old_level, _ = get_level_from_xp(entry["xp"])
+        entry["xp"] += xp_gained
+        new_level, _ = get_level_from_xp(entry["xp"])
+
+        save_levels(levels)
+
+        if new_level > old_level:
+            await announce_level_up(guild, member, new_level)
+
+
+
+# ==========================
+# Rank & Leaderboard Commands
+# ==========================
+
+def format_progress_bar(progress: int, needed: int, length: int = 12) -> str:
+
+    filled = int(length * progress / needed) if needed else 0
+    filled = max(0, min(length, filled))
+
+    return "█" * filled + "░" * (length - filled)
+
+
+
+@bot.tree.command(name="rank", description="Check your level and XP, or someone else's")
+@app_commands.describe(member="Member to check (defaults to you)")
+@app_commands.guild_only()
+async def rank(interaction: discord.Interaction, member: discord.Member = None):
+
+    target = member or interaction.user
+    levels = load_levels()
+    entry = levels.get(str(target.id))
+
+    if entry is None or entry.get("xp", 0) == 0:
+        await interaction.response.send_message(
+            f"{target.display_name} hasn't earned any xp yet."
+        )
+        return
+
+    xp = entry["xp"]
+    level, progress = get_level_from_xp(xp)
+    needed = xp_for_level(level)
+
+    sorted_users = sorted(levels.items(), key=lambda kv: kv[1].get("xp", 0), reverse=True)
+    rank_position = next(
+        (i for i, (uid, _) in enumerate(sorted_users, start=1) if uid == str(target.id)),
+        None
+    )
+
+    bar = format_progress_bar(progress, needed)
+
+    embed = discord.Embed(
+        title=f"{target.display_name}'s rank",
+        description=(
+            f"level **{level}**  ·  rank **#{rank_position}**\n"
+            f"{bar}  {progress}/{needed} xp\n"
+            f"total xp: **{xp}**"
+        ),
+        color=discord.Color.blurple()
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+
+    await interaction.response.send_message(embed=embed)
+
+
+
+@bot.tree.command(name="leaderboard", description="Show the top members by XP")
+@app_commands.guild_only()
+async def leaderboard(interaction: discord.Interaction):
+
+    levels = load_levels()
+    sorted_users = sorted(levels.items(), key=lambda kv: kv[1].get("xp", 0), reverse=True)
+    top = sorted_users[:10]
+
+    if not top:
+        await interaction.response.send_message("nobody's earned xp yet.")
+        return
+
+    lines = []
+
+    for i, (user_id, entry) in enumerate(top, start=1):
+
+        member = interaction.guild.get_member(int(user_id))
+        name = member.display_name if member else f"unknown user ({user_id})"
+        level, _ = get_level_from_xp(entry.get("xp", 0))
+
+        lines.append(f"**{i}.** {name} — level {level} ({entry.get('xp', 0)} xp)")
+
+    embed = discord.Embed(
+        title="leaderboard",
+        description="\n".join(lines),
+        color=discord.Color.gold()
+    )
+
+    await interaction.response.send_message(embed=embed)
 
 
 
