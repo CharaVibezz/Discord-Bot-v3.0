@@ -45,6 +45,7 @@ class Config:
     # bigger blast radius than a prank timeout. Left empty on purpose: an empty
     # whitelist means the command is inert until someone explicitly staffs it.
     SELFDESTRUCT_ALLOWED_ROLES = {
+        1525540205761794213
         # add the specific role id(s) you trust with this
     }
     
