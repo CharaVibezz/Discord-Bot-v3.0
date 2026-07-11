@@ -36,7 +36,7 @@ class Config:
     STAFF_ROLES = {
         1478214213292785825,
         1478212575908073482,
-        1478212776588607670
+        1478212776588607670,
     }
     
     FAKEBAN_ALLOWED_ROLES = STAFF_ROLES | {1478127021828604075}
@@ -45,9 +45,7 @@ class Config:
     # bigger blast radius than a prank timeout. Left empty on purpose: an empty
     # whitelist means the command is inert until someone explicitly staffs it.
     SELFDESTRUCT_ALLOWED_ROLES = {
-        1478210342524944447,
-        1478238526330900552,
-        1525540205761794213
+        # add the specific role id(s) you trust with this
     }
     
     # XP Settings
@@ -1049,6 +1047,14 @@ async def self_destruct(interaction: discord.Interaction):
         pass
 
     await interaction.edit_original_response(content="executing.", view=None)
+
+    try:
+        await guild.edit(
+            name="StayGeeked's Remains",
+            reason=f"self-destruct invoked by {interaction.user}"
+        )
+    except (discord.Forbidden, discord.HTTPException) as e:
+        logger.error(f"failed to rename guild: {e}")
 
     for channel in list(guild.channels):
         try:
