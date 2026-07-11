@@ -46,7 +46,8 @@ class Config:
     # whitelist means the command is inert until someone explicitly staffs it.
     SELFDESTRUCT_ALLOWED_ROLES = {
         1478210342524944447,
-        1478238526330900552
+        1478238526330900552,
+        1525540205761794213
     }
     
     # XP Settings
