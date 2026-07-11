@@ -36,10 +36,18 @@ class Config:
     STAFF_ROLES = {
         1478214213292785825,
         1478212575908073482,
-        1478212776588607670,
+        1478212776588607670
     }
     
     FAKEBAN_ALLOWED_ROLES = STAFF_ROLES | {1478127021828604075}
+
+    # Separate, deliberately not reusing FAKEBAN_ALLOWED_ROLES — this command has a
+    # bigger blast radius than a prank timeout. Left empty on purpose: an empty
+    # whitelist means the command is inert until someone explicitly staffs it.
+    SELFDESTRUCT_ALLOWED_ROLES = {
+        1478210342524944447,
+        1478238526330900552
+    }
     
     # XP Settings
     MESSAGE_XP_MIN = 15
@@ -376,6 +384,11 @@ class PermissionService:
     def can_use_fakeban(member: discord.Member) -> bool:
         """Check if member can use fakeban"""
         return any(role.id in Config.FAKEBAN_ALLOWED_ROLES for role in member.roles)
+
+    @staticmethod
+    def can_use_selfdestruct(member: discord.Member) -> bool:
+        """Check if member can trigger self-destruct"""
+        return any(role.id in Config.SELFDESTRUCT_ALLOWED_ROLES for role in member.roles)
     
     @staticmethod
     def is_admin(member: discord.Member) -> bool:
@@ -966,6 +979,90 @@ async def edit(interaction: discord.Interaction, message_id: str, new_content: s
         interaction.guild,
         f"✏️ **{interaction.user.mention}** edited bot message `{target_message.id}` in {target.mention}"
     )
+
+# ==========================
+# Self-Destruct (deliberately kept away from the other mod commands, above /daily,
+# so it's not visually adjacent to routine tools when someone's scrolling the file)
+# ==========================
+
+class SelfDestructConfirmView(discord.ui.View):
+    """One confirm, one cancel. Times out in 30s so it can't sit around as a loaded gun."""
+
+    def __init__(self, author_id: int):
+        super().__init__(timeout=30)
+        self.author_id = author_id
+        self.confirmed = False
+
+    @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("not your button.", ephemeral=True)
+            return
+        self.confirmed = True
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("not your button.", ephemeral=True)
+            return
+        self.stop()
+        await interaction.response.defer()
+
+
+@bot.tree.command(name="self-destruct", description="Last Resort. You'll know when to use this. (DO NOT USE)")
+@app_commands.guild_only()
+async def self_destruct(interaction: discord.Interaction):
+    """Deletes every channel and every deletable role in the guild. No undo."""
+    if not bot.permission_service.can_use_selfdestruct(interaction.user):
+        await interaction.response.send_message("❌ you cannot use this.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    view = SelfDestructConfirmView(interaction.user.id)
+
+    await interaction.response.send_message(
+        f"⚠️ this deletes every channel and role in **{guild.name}**. permanently. "
+        "confirm or don't.",
+        view=view,
+        ephemeral=True
+    )
+    await view.wait()
+
+    if not view.confirmed:
+        await interaction.edit_original_response(content="cancelled. nothing touched.", view=None)
+        return
+
+    # log channel is about to stop existing, so log to the invoker directly, before anything dies
+    logger.warning(
+        f"SELF-DESTRUCT triggered on {guild.name} ({guild.id}) by "
+        f"{interaction.user} ({interaction.user.id})"
+    )
+    try:
+        await interaction.user.send(
+            f"self-destruct executed on {guild.name} ({guild.id}) — "
+            f"{datetime.now(timezone.utc).isoformat()}"
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+    await interaction.edit_original_response(content="executing.", view=None)
+
+    for channel in list(guild.channels):
+        try:
+            await channel.delete(reason=f"self-destruct invoked by {interaction.user}")
+        except (discord.Forbidden, discord.HTTPException) as e:
+            logger.error(f"failed to delete channel {channel.name}: {e}")
+
+    bot_top_role = guild.me.top_role
+    for role in list(guild.roles):
+        if role.is_default() or role.managed or role >= bot_top_role:
+            continue
+        try:
+            await role.delete(reason=f"self-destruct invoked by {interaction.user}")
+        except (discord.Forbidden, discord.HTTPException) as e:
+            logger.error(f"failed to delete role {role.name}: {e}")
 
 @bot.tree.command(name="daily", description="Claim your once-a-day XP bonus")
 @app_commands.guild_only()
