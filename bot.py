@@ -125,65 +125,43 @@ async def on_ready():
 # ==========================
 # Fake Ban Command
 # ==========================
+# slash version. interaction.response can only fire once, so the
+# countdown edits go through edit_original_response instead of
+# ctx.send/msg.edit like the prefix version did.
 
-@bot.command()
-async def fakeban(ctx, member: discord.Member = None):
+@bot.tree.command(name="fakeban", description="Prank-ban a member (timeout, not a real ban)")
+@app_commands.describe(member="The member to fake ban")
+async def fakeban(interaction: discord.Interaction, member: discord.Member):
 
-
-    # Check fakeban role permission
     allowed = any(
         role.id in FAKEBAN_ALLOWED_ROLES
-        for role in ctx.author.roles
+        for role in interaction.user.roles
     )
 
-
     if not allowed:
-
-        msg = await ctx.send(
-            f"{ctx.author.mention} ❌ You cannot use this command."
+        await interaction.response.send_message(
+            "❌ You cannot use this command.", ephemeral=True
         )
-
-        await msg.delete(delay=5)
-
         return
-
-
-
-    if member is None:
-
-        msg = await ctx.send(
-            "❌ Please mention someone to fake ban."
-        )
-
-        await msg.delete(delay=5)
-
-        return
-
 
 
     # Prevent fake banning administrators
     if member.guild_permissions.administrator:
-
-        msg = await ctx.send(
-            "❌ You cannot fakeban an administrator."
+        await interaction.response.send_message(
+            "❌ You cannot fakeban an administrator.", ephemeral=True
         )
-
-        await msg.delete(delay=5)
-
         return
 
 
-
-    countdown = await ctx.send(
+    await interaction.response.send_message(
         f"🔨 Preparing ban for {member.mention}..."
     )
-
 
 
     # Countdown from 5
     for number in range(5, 0, -1):
 
-        await countdown.edit(
+        await interaction.edit_original_response(
             content=(
                 f"🔨 Preparing ban for {member.mention}\n"
                 f"Executing in **{number}**..."
@@ -191,7 +169,6 @@ async def fakeban(ctx, member: discord.Member = None):
         )
 
         await asyncio.sleep(1)
-
 
 
     # Send fake ban DM
@@ -214,7 +191,6 @@ async def fakeban(ctx, member: discord.Member = None):
         )
 
 
-
     # Timeout user for 10 seconds
     try:
 
@@ -223,14 +199,12 @@ async def fakeban(ctx, member: discord.Member = None):
             reason="Fake ban prank"
         )
 
-
     except discord.Forbidden:
 
         print(
             "Cannot timeout user. "
             "Check Moderate Members permission and role order."
         )
-
 
     except discord.HTTPException:
 
@@ -239,9 +213,8 @@ async def fakeban(ctx, member: discord.Member = None):
         )
 
 
-
     # Fake ban result
-    await countdown.edit(
+    await interaction.edit_original_response(
         content=(
             f"🔨 {member.mention} has been banned.\n"
             "Reason: Breaking the rules.\n"
@@ -249,11 +222,8 @@ async def fakeban(ctx, member: discord.Member = None):
     )
 
 
-    await countdown.delete(delay=10)
-
-
     print(
-        f"{ctx.author} fake banned {member}"
+        f"{interaction.user} fake banned {member}"
     )
 
 
@@ -382,19 +352,6 @@ async def on_message(message):
     # Ignore bots
 
     if message.author.bot:
-        return
-
-
-
-    # Process commands first
-
-    await bot.process_commands(message)
-
-
-
-    # Prevent commands triggering channel punishment
-
-    if message.content.startswith("!"):
         return
 
 
