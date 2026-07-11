@@ -55,7 +55,7 @@ FAKEBAN_ALLOWED_ROLES = [
 
 # Channel where the bot posts a record of every moderation action it takes.
 # Replace with your actual log channel ID.
-LOG_CHANNEL_ID = 1525377874868305940
+LOG_CHANNEL_ID = 1525220657560817767
 
 
 WARNING_FILE = os.path.join(DATA_DIR, "warnings.json")
@@ -75,7 +75,7 @@ LEVELS_FILE = os.path.join(DATA_DIR, "levels.json")
 MESSAGE_XP_MIN = 15
 MESSAGE_XP_MAX = 25
 MESSAGE_XP_COOLDOWN_SECONDS = 60      # per-message xp, once per this window
-DAILY_MESSAGE_BONUS_XP = 20           # separate from cooldown - once per calendar day
+DAILY_BONUS_XP = 20                   # claimed via /daily, once per calendar day (UTC)
 
 VOICE_XP_PER_MINUTE = 10
 VOICE_XP_DIMINISH_AFTER_MINUTES = 60  # full rate up to this point in one session
@@ -84,7 +84,7 @@ VOICE_XP_DIMINISHED_RATE = VOICE_XP_PER_MINUTE / 2
 # Channel for level-up announcements. Set to None to just post in
 # whatever channel triggered the level-up (message xp) or fall back
 # to the log channel (voice xp). Replace with a channel ID to pin it.
-LEVEL_UP_CHANNEL_ID = 1478968552353562816
+LEVEL_UP_CHANNEL_ID = None
 
 
 # ==========================
@@ -227,8 +227,19 @@ async def announce_level_up(guild: discord.Guild, member: discord.Member, new_le
         channel = fallback_channel or guild.get_channel(LOG_CHANNEL_ID)
 
     if channel is not None:
+
+        embed = discord.Embed(
+            description=f"{member.mention} just hit **level {new_level}**.",
+            color=discord.Color.gold()
+        )
+        embed.set_author(
+            name=f"{member.display_name} leveled up!",
+            icon_url=member.display_avatar.url
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+
         try:
-            await channel.send(f"🎉 {member.mention} just hit **level {new_level}**.")
+            await channel.send(embed=embed)
         except (discord.Forbidden, discord.HTTPException):
             pass
 
@@ -263,12 +274,6 @@ async def award_message_xp(message: discord.Message):
     if not on_cooldown:
         gained += random.randint(MESSAGE_XP_MIN, MESSAGE_XP_MAX)
         entry["last_message_time"] = now.isoformat()
-
-    today = now.date().isoformat()
-
-    if entry.get("last_daily_bonus") != today:
-        gained += DAILY_MESSAGE_BONUS_XP
-        entry["last_daily_bonus"] = today
 
     if gained == 0:
         return
@@ -986,7 +991,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
 
 # ==========================
-# Rank & Leaderboard Commands
+# Daily, Rank & Leaderboard Commands
 # ==========================
 
 def format_progress_bar(progress: int, needed: int, length: int = 12) -> str:
@@ -995,6 +1000,47 @@ def format_progress_bar(progress: int, needed: int, length: int = 12) -> str:
     filled = max(0, min(length, filled))
 
     return "█" * filled + "░" * (length - filled)
+
+
+
+@bot.tree.command(name="daily", description="Claim your once-a-day XP bonus")
+@app_commands.guild_only()
+async def daily(interaction: discord.Interaction):
+
+    levels = load_levels()
+    user_id = str(interaction.user.id)
+    entry = get_or_create_entry(levels, user_id)
+
+    now = discord.utils.utcnow()
+    today = now.date().isoformat()
+
+    if entry.get("last_daily_bonus") == today:
+        await interaction.response.send_message(
+            "already claimed today's bonus. resets at 00:00 UTC.",
+            ephemeral=True
+        )
+        return
+
+    old_level, _ = get_level_from_xp(entry["xp"])
+    entry["xp"] += DAILY_BONUS_XP
+    entry["last_daily_bonus"] = today
+    new_level, _ = get_level_from_xp(entry["xp"])
+
+    save_levels(levels)
+
+    embed = discord.Embed(
+        description=f"claimed **+{DAILY_BONUS_XP} xp**\ntotal xp: **{entry['xp']:,}**",
+        color=discord.Color.green()
+    )
+    embed.set_author(
+        name=f"{interaction.user.display_name}'s daily bonus",
+        icon_url=interaction.user.display_avatar.url
+    )
+
+    await interaction.response.send_message(embed=embed)
+
+    if new_level > old_level:
+        await announce_level_up(interaction.guild, interaction.user, new_level, interaction.channel)
 
 
 
@@ -1026,15 +1072,21 @@ async def rank(interaction: discord.Interaction, member: discord.Member = None):
     bar = format_progress_bar(progress, needed)
 
     embed = discord.Embed(
-        title=f"{target.display_name}'s rank",
-        description=(
-            f"level **{level}**  ·  rank **#{rank_position}**\n"
-            f"{bar}  {progress}/{needed} xp\n"
-            f"total xp: **{xp}**"
-        ),
         color=discord.Color.blurple()
     )
+    embed.set_author(
+        name=f"{target.display_name}'s rank",
+        icon_url=target.display_avatar.url
+    )
     embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="Level", value=str(level), inline=True)
+    embed.add_field(name="Server Rank", value=f"#{rank_position}", inline=True)
+    embed.add_field(name="Total XP", value=f"{xp:,}", inline=True)
+    embed.add_field(
+        name="Progress to Next Level",
+        value=f"{bar}\n{progress:,} / {needed:,} xp",
+        inline=False
+    )
 
     await interaction.response.send_message(embed=embed)
 
@@ -1053,20 +1105,23 @@ async def leaderboard(interaction: discord.Interaction):
         return
 
     lines = []
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
 
     for i, (user_id, entry) in enumerate(top, start=1):
 
         member = interaction.guild.get_member(int(user_id))
         name = member.display_name if member else f"unknown user ({user_id})"
         level, _ = get_level_from_xp(entry.get("xp", 0))
+        rank_marker = medals.get(i, f"**{i}.**")
 
-        lines.append(f"**{i}.** {name} — level {level} ({entry.get('xp', 0)} xp)")
+        lines.append(f"{rank_marker}  **{name}**\nLevel {level}  ·  {entry.get('xp', 0):,} xp")
 
     embed = discord.Embed(
-        title="leaderboard",
-        description="\n".join(lines),
+        title="🏆 Leaderboard",
+        description="\n\n".join(lines),
         color=discord.Color.gold()
     )
+    embed.set_footer(text=f"Top {len(top)} by total XP")
 
     await interaction.response.send_message(embed=embed)
 
