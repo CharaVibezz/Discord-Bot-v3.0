@@ -342,6 +342,93 @@ async def move(interaction: discord.Interaction, member: discord.Member, channel
 
 
 # ==========================
+# Mass Move Command
+# ==========================
+# discord.Member parameters give you a real picker in the slash
+# command UI - searched and selected, not typed. that removes the
+# whole username-resolution problem: no typos, no duplicate display
+# names, no "who did you mean" ambiguity. tradeoff is a hard cap -
+# 10 slots here, all but the first optional. discord allows up to
+# 25 options per command total, so this isn't pushing any limit.
+
+@bot.tree.command(name="mass-move", description="Move multiple members into a specified voice channel")
+@app_commands.describe(
+    channel="The destination voice channel",
+    member1="Member to move",
+    member2="Member to move (optional)",
+    member3="Member to move (optional)",
+    member4="Member to move (optional)",
+    member5="Member to move (optional)",
+    member6="Member to move (optional)",
+    member7="Member to move (optional)",
+    member8="Member to move (optional)",
+    member9="Member to move (optional)",
+    member10="Member to move (optional)",
+)
+async def mass_move(
+    interaction: discord.Interaction,
+    channel: discord.VoiceChannel,
+    member1: discord.Member,
+    member2: discord.Member = None,
+    member3: discord.Member = None,
+    member4: discord.Member = None,
+    member5: discord.Member = None,
+    member6: discord.Member = None,
+    member7: discord.Member = None,
+    member8: discord.Member = None,
+    member9: discord.Member = None,
+    member10: discord.Member = None,
+):
+
+    if not has_staff_role(interaction.user):
+        await interaction.response.send_message(
+            "you don't have permission for that.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer()
+
+    # dedupe by id in case someone gets picked twice across slots
+    candidates = [member1, member2, member3, member4, member5,
+                  member6, member7, member8, member9, member10]
+
+    seen = set()
+    members = []
+    for m in candidates:
+        if m is not None and m.id not in seen:
+            seen.add(m.id)
+            members.append(m)
+
+    moved = []
+    not_in_voice = []
+    failed = []
+
+    for member in members:
+
+        if member.voice is None or member.voice.channel is None:
+            not_in_voice.append(member.display_name)
+            continue
+
+        try:
+            await member.move_to(channel, reason=f"Mass moved by {interaction.user}")
+            moved.append(member.display_name)
+        except (discord.Forbidden, discord.HTTPException):
+            failed.append(member.display_name)
+
+    lines = []
+
+    if moved:
+        lines.append(f"✅ moved to {channel.mention}: " + ", ".join(moved))
+    if not_in_voice:
+        lines.append("⚪ not in a voice channel: " + ", ".join(not_in_voice))
+    if failed:
+        lines.append("❌ move failed (permissions/role order): " + ", ".join(failed))
+
+    await interaction.followup.send("\n".join(lines))
+
+
+
+# ==========================
 # Message Protection System
 # ==========================
 
