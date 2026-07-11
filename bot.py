@@ -29,7 +29,7 @@ class Config:
     
     # Channel IDs
     TARGET_CHANNEL_ID = 1525220657560817766
-    LOG_CHANNEL_ID = 1525377874868305940
+    LOG_CHANNEL_ID = 1525220657560817767
     LEVEL_UP_CHANNEL_ID = 1525392046989246525
     
     # Role IDs
@@ -420,11 +420,14 @@ class ModBot(commands.Bot):
         # Voice sessions cache
         self.voice_sessions: Dict[str, datetime] = {}
         
-        # Background tasks
-        self.voice_cleanup.start()
+        # Note: Background tasks are started in setup_hook
     
     async def setup_hook(self):
         """Setup hook - runs before bot starts"""
+        # Start background tasks (event loop is running)
+        self.voice_cleanup.start()
+        
+        # Sync slash commands
         try:
             await self.tree.sync()
             logger.info("Slash commands synced")
@@ -469,6 +472,9 @@ class ModBot(commands.Bot):
     async def voice_cleanup(self):
         """Clean up stale voice sessions"""
         try:
+            # Ensure bot is ready before running
+            await self.wait_until_ready()
+            
             now = datetime.utcnow()
             active_users = set()
             
@@ -494,6 +500,11 @@ class ModBot(commands.Bot):
                 
         except Exception as e:
             logger.error(f"Voice cleanup failed: {e}")
+    
+    @voice_cleanup.before_loop
+    async def before_voice_cleanup(self):
+        """Wait for bot to be ready before starting the loop"""
+        await self.wait_until_ready()
 
 # ==========================
 # Bot Instance
