@@ -770,6 +770,119 @@ async def mass_move(
 
 
 # ==========================
+# Say & Edit Commands
+# ==========================
+# message_id comes in as a string, not discord's int option type -
+# snowflakes are 64-bit and can exceed what a JSON number safely
+# round-trips through a client. string in, int() it internally.
+
+@bot.tree.command(name="say", description="Send a message through the bot")
+@app_commands.describe(
+    message="What the bot should say",
+    channel="Channel to post in (defaults to this channel)"
+)
+@app_commands.guild_only()
+async def say(interaction: discord.Interaction, message: str, channel: discord.TextChannel = None):
+
+    if not has_staff_role(interaction.user):
+        await interaction.response.send_message(
+            "you don't have permission for that.", ephemeral=True
+        )
+        return
+
+    target_channel = channel or interaction.channel
+
+    try:
+        sent = await target_channel.send(message)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "missing permission to send messages there.", ephemeral=True
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"discord rejected that: {e}", ephemeral=True)
+        return
+
+    # message id comes back here so it can be handed straight to /edit later
+    await interaction.response.send_message(
+        f"sent to {target_channel.mention}. message id: `{sent.id}`", ephemeral=True
+    )
+
+    await log_action(
+        interaction.guild,
+        f"💬 **{interaction.user.mention}** used /say in {target_channel.mention} — message id `{sent.id}`"
+    )
+
+
+
+@bot.tree.command(name="edit", description="Edit a previous message sent by the bot")
+@app_commands.describe(
+    message_id="The ID of the bot's message to edit",
+    new_content="The new message content",
+    channel="Channel the message is in (defaults to this channel)"
+)
+@app_commands.guild_only()
+async def edit(interaction: discord.Interaction, message_id: str, new_content: str, channel: discord.TextChannel = None):
+
+    if not has_staff_role(interaction.user):
+        await interaction.response.send_message(
+            "you don't have permission for that.", ephemeral=True
+        )
+        return
+
+    target_channel = channel or interaction.channel
+
+    try:
+        message_id_int = int(message_id)
+    except ValueError:
+        await interaction.response.send_message("that's not a valid message id.", ephemeral=True)
+        return
+
+    try:
+        target_message = await target_channel.fetch_message(message_id_int)
+    except discord.NotFound:
+        await interaction.response.send_message(
+            "no message with that id in that channel.", ephemeral=True
+        )
+        return
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "missing permission to read that channel's message history.", ephemeral=True
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"discord rejected that: {e}", ephemeral=True)
+        return
+
+    if target_message.author.id != bot.user.id:
+        await interaction.response.send_message(
+            "that message wasn't sent by this bot. can't edit it.", ephemeral=True
+        )
+        return
+
+    try:
+        await target_message.edit(content=new_content)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "missing permission to edit that message.", ephemeral=True
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"discord rejected that: {e}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"edited message `{target_message.id}` in {target_channel.mention}.", ephemeral=True
+    )
+
+    await log_action(
+        interaction.guild,
+        f"✏️ **{interaction.user.mention}** edited bot message `{target_message.id}` in {target_channel.mention}"
+    )
+
+
+
+# ==========================
 # Message Protection System
 # ==========================
 
