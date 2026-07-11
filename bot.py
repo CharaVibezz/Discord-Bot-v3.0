@@ -1,5 +1,6 @@
 from datetime import timedelta
 import discord
+from discord import app_commands
 from discord.ext import commands
 import json
 import os
@@ -88,6 +89,16 @@ bot = commands.Bot(
 )
 
 
+# ==========================
+# Shared permission check
+# ==========================
+# same staff list the fakeban command uses. one source of truth,
+# not two lists that drift apart over time.
+
+def has_staff_role(member: discord.Member) -> bool:
+    return any(role.id in STAFF_ROLES for role in member.roles)
+
+
 
 # ==========================
 # Bot Startup
@@ -98,6 +109,14 @@ async def on_ready():
 
     print("----------------------------")
     print(f"Logged in as {bot.user}")
+    print("Bot is online and running!")
+
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} slash command(s).")
+    except Exception as e:
+        print(f"Slash command sync failed: {e}")
+
     print("Bot is online and running!")
     print("----------------------------")
 
@@ -235,6 +254,119 @@ async def fakeban(ctx, member: discord.Member = None):
 
     print(
         f"{ctx.author} fake banned {member}"
+    )
+
+
+
+# ==========================
+# Voice Lockdown Commands
+# ==========================
+# lockdown denies @everyone the Connect permission on the target
+# voice channel. anyone already inside stays inside - this blocks
+# new joins, it doesn't eject people. if you want them out too,
+# that's a different command, ask for it separately.
+
+@bot.tree.command(name="lockdown", description="Prevent members from joining a voice channel")
+@app_commands.describe(channel="The voice channel to lock")
+async def lockdown(interaction: discord.Interaction, channel: discord.VoiceChannel):
+
+    if not has_staff_role(interaction.user):
+        await interaction.response.send_message(
+            "you don't have permission for that.", ephemeral=True
+        )
+        return
+
+    overwrite = channel.overwrites_for(interaction.guild.default_role)
+    overwrite.connect = False
+
+    try:
+        await channel.set_permissions(
+            interaction.guild.default_role,
+            overwrite=overwrite,
+            reason=f"Voice lockdown by {interaction.user}"
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "missing permission to edit that channel. check role order and Manage Channels.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"🔒 {channel.mention} is locked. nobody new gets in until someone runs `/unlock`."
+    )
+
+
+
+@bot.tree.command(name="unlock", description="Allow members to join a previously locked voice channel")
+@app_commands.describe(channel="The voice channel to unlock")
+async def unlock(interaction: discord.Interaction, channel: discord.VoiceChannel):
+
+    if not has_staff_role(interaction.user):
+        await interaction.response.send_message(
+            "you don't have permission for that.", ephemeral=True
+        )
+        return
+
+    overwrite = channel.overwrites_for(interaction.guild.default_role)
+    overwrite.connect = None  # reset to whatever the category/role defaults are, not force True
+
+    try:
+        await channel.set_permissions(
+            interaction.guild.default_role,
+            overwrite=overwrite,
+            reason=f"Voice unlock by {interaction.user}"
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "missing permission to edit that channel. check role order and Manage Channels.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(f"🔓 {channel.mention} is unlocked.")
+
+
+
+# ==========================
+# Move Member Command
+# ==========================
+# discord.Member and discord.VoiceChannel as parameter types give you
+# a proper picker in the slash command UI - a dropdown searched by
+# username and channel name. more reliable than parsing raw strings,
+# and it's what you actually asked for functionally.
+
+@bot.tree.command(name="move", description="Move a member into a specified voice channel")
+@app_commands.describe(member="The member to move", channel="The destination voice channel")
+async def move(interaction: discord.Interaction, member: discord.Member, channel: discord.VoiceChannel):
+
+    if not has_staff_role(interaction.user):
+        await interaction.response.send_message(
+            "you don't have permission for that.", ephemeral=True
+        )
+        return
+
+    if member.voice is None or member.voice.channel is None:
+        await interaction.response.send_message(
+            f"{member.display_name} isn't in a voice channel. can't move what isn't there.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        await member.move_to(channel, reason=f"Moved by {interaction.user}")
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "missing permission to move members. check Move Members and role order.",
+            ephemeral=True
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"discord rejected that: {e}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"moved {member.display_name} to {channel.mention}."
     )
 
 
