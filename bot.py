@@ -1226,23 +1226,28 @@ async def move(interaction: discord.Interaction, member: discord.Member, channel
             ephemeral=True
         )
         return
-    
+
+    # move_to() is a real API call — mass-move already defers for this reason,
+    # this one didn't. defer up front so a slow response can't outlive the
+    # 3-second interaction token (same bug that hit strip-roles).
+    await interaction.response.defer()
+
     try:
         await member.move_to(channel, reason=f"Moved by {interaction.user}")
     except discord.Forbidden:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "❌ Missing Move Members permission or role order issue.",
             ephemeral=True
         )
         return
     except discord.HTTPException as e:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"❌ Discord error: {e}",
             ephemeral=True
         )
         return
     
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"✅ Moved {member.display_name} to {channel.mention}."
     )
     await bot.logging_service.log_action(
@@ -1544,6 +1549,12 @@ async def strip_roles(interaction: discord.Interaction, member: discord.Member):
     if not await bot.permission_service.require_staff(interaction):
         return
 
+    # remove_roles() below is a real API call and can occasionally take long
+    # enough that the 3-second interaction token expires before we get to
+    # our final send_message — defer immediately so the token stays alive
+    # regardless of how long the role edit takes.
+    await interaction.response.defer()
+
     bot_top_role = interaction.guild.me.top_role
     to_remove = []
 
@@ -1559,7 +1570,7 @@ async def strip_roles(interaction: discord.Interaction, member: discord.Member):
         to_remove.append(role)
 
     if not to_remove:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"❌ nothing to remove — {member.display_name} has no roles outside the whitelist.",
             ephemeral=True
         )
@@ -1568,7 +1579,7 @@ async def strip_roles(interaction: discord.Interaction, member: discord.Member):
     try:
         await member.remove_roles(*to_remove, reason=f"role strip by {interaction.user}")
     except (discord.Forbidden, discord.HTTPException) as e:
-        await interaction.response.send_message(f"❌ failed: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ failed: {e}", ephemeral=True)
         return
 
     # remember what was removed so /restore-roles can put it back. keyed by
@@ -1578,7 +1589,7 @@ async def strip_roles(interaction: discord.Interaction, member: discord.Member):
     await bot.data_manager.save("stripped_roles.json", stripped)
 
     removed_names = ", ".join(r.name for r in to_remove)
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"✅ stripped {len(to_remove)} role(s) from {member.mention}: {removed_names}"
     )
     await bot.logging_service.log_action(
@@ -1599,11 +1610,15 @@ async def restore_roles(interaction: discord.Interaction, member: discord.Member
     if not await bot.permission_service.require_staff(interaction):
         return
 
+    # same reasoning as strip-roles: add_roles() is a network call, defer up
+    # front so a slow response doesn't burn the 3-second interaction token.
+    await interaction.response.defer()
+
     stripped = await bot.data_manager.load("stripped_roles.json", {})
     role_ids = stripped.get(str(member.id))
 
     if not role_ids:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"❌ no recorded strip for {member.display_name} — nothing to restore.",
             ephemeral=True
         )
@@ -1626,7 +1641,7 @@ async def restore_roles(interaction: discord.Interaction, member: discord.Member
         to_add.append(role)
 
     if not to_add and not skipped:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"❌ {member.display_name} already has every recorded role back.",
             ephemeral=True
         )
@@ -1638,7 +1653,7 @@ async def restore_roles(interaction: discord.Interaction, member: discord.Member
         try:
             await member.add_roles(*to_add, reason=f"role restore by {interaction.user}")
         except (discord.Forbidden, discord.HTTPException) as e:
-            await interaction.response.send_message(f"❌ failed: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ failed: {e}", ephemeral=True)
             return
 
     stripped.pop(str(member.id), None)
@@ -1650,7 +1665,7 @@ async def restore_roles(interaction: discord.Interaction, member: discord.Member
     if skipped:
         parts.append(f"⚪ skipped: {', '.join(skipped)}")
 
-    await interaction.response.send_message("\n".join(parts))
+    await interaction.followup.send("\n".join(parts))
     await bot.logging_service.log_action(
         interaction.guild,
         f"↩️ **{interaction.user.mention}** restored roles to **{member.mention}**: "
