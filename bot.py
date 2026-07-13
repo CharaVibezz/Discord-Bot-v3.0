@@ -52,6 +52,17 @@ class Config:
     # role sync: anyone holding VERIFIED_ROLE_ID has UNVERIFIED_ROLE_ID stripped
     VERIFIED_ROLE_ID = 1478213211307380838
     UNVERIFIED_ROLE_ID = 1478213220408889384
+
+    # roles that survive a /strip-roles call regardless of who holds them.
+    # empty by default — same reasoning as SELFDESTRUCT_ALLOWED_ROLES: an
+    # unconfigured whitelist means the command strips everything, not that
+    # it quietly protects roles nobody told it to protect
+    KEEP_ROLES_WHITELIST: set = {
+        1478213157804572722,
+        1478212910735032482,
+        1478212776588607670,
+        1478213318177980426,
+    }
     
     # XP Settings — level curve: xp_for_level(n) = LEVEL_A*n^2 + LEVEL_B*n + LEVEL_C
     LEVEL_A = 35
@@ -104,6 +115,10 @@ class Config:
     WARNING_FILE = DATA_DIR / "warnings.json"
     LEVELS_FILE = DATA_DIR / "levels.json"
     VOICE_SESSIONS_FILE = DATA_DIR / "voice_sessions.json"
+    # user_id -> [role_id, ...] removed by the most recent /strip-roles call.
+    # overwritten on every strip — restore always undoes the latest one, not
+    # a history of every strip that's ever happened
+    STRIPPED_ROLES_FILE = DATA_DIR / "stripped_roles.json"
     
     # Logging
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -1519,6 +1534,130 @@ async def voice_xp_logging(interaction: discord.Interaction, enabled: bool):
         f"⚙️ **{interaction.user.mention}** turned voice xp detailed logging **{state}**"
     )
 
+@bot.tree.command(name="strip-roles", description="Remove all roles from a member except the configured whitelist")
+@app_commands.describe(member="The member to strip")
+@app_commands.guild_only()
+async def strip_roles(interaction: discord.Interaction, member: discord.Member):
+    """Remove every role from member except Config.KEEP_ROLES_WHITELIST, managed
+    roles (bot integrations), and anything at or above the bot's top role —
+    those last two can't be touched regardless of whitelist."""
+    if not await bot.permission_service.require_staff(interaction):
+        return
+
+    bot_top_role = interaction.guild.me.top_role
+    to_remove = []
+
+    for role in member.roles:
+        if role.is_default():
+            continue  # @everyone, nothing to remove
+        if role.id in Config.KEEP_ROLES_WHITELIST:
+            continue
+        if role.managed:
+            continue  # bot/integration role, removal would just fail
+        if role >= bot_top_role:
+            continue  # above the bot, would 403
+        to_remove.append(role)
+
+    if not to_remove:
+        await interaction.response.send_message(
+            f"❌ nothing to remove — {member.display_name} has no roles outside the whitelist.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        await member.remove_roles(*to_remove, reason=f"role strip by {interaction.user}")
+    except (discord.Forbidden, discord.HTTPException) as e:
+        await interaction.response.send_message(f"❌ failed: {e}", ephemeral=True)
+        return
+
+    # remember what was removed so /restore-roles can put it back. keyed by
+    # member id, overwritten each strip — see STRIPPED_ROLES_FILE comment.
+    stripped = await bot.data_manager.load("stripped_roles.json", {})
+    stripped[str(member.id)] = [r.id for r in to_remove]
+    await bot.data_manager.save("stripped_roles.json", stripped)
+
+    removed_names = ", ".join(r.name for r in to_remove)
+    await interaction.response.send_message(
+        f"✅ stripped {len(to_remove)} role(s) from {member.mention}: {removed_names}"
+    )
+    await bot.logging_service.log_action(
+        interaction.guild,
+        f"🧹 **{interaction.user.mention}** stripped roles from **{member.mention}**: {removed_names}",
+        discord.Color.orange()
+    )
+
+@bot.tree.command(name="restore-roles", description="Add back the roles removed by the most recent /strip-roles on a member")
+@app_commands.describe(member="The member to restore")
+@app_commands.guild_only()
+async def restore_roles(interaction: discord.Interaction, member: discord.Member):
+    """Re-adds whatever /strip-roles most recently took from member. Not a
+    general role backup — only covers strips, and only the latest one per
+    member. Clears the stored record on success so a second restore-roles
+    call is a no-op instead of re-adding roles the staff member re-removed
+    on purpose in between."""
+    if not await bot.permission_service.require_staff(interaction):
+        return
+
+    stripped = await bot.data_manager.load("stripped_roles.json", {})
+    role_ids = stripped.get(str(member.id))
+
+    if not role_ids:
+        await interaction.response.send_message(
+            f"❌ no recorded strip for {member.display_name} — nothing to restore.",
+            ephemeral=True
+        )
+        return
+
+    bot_top_role = interaction.guild.me.top_role
+    to_add = []
+    skipped = []
+
+    for role_id in role_ids:
+        role = interaction.guild.get_role(role_id)
+        if not role:
+            skipped.append(f"`{role_id}` (deleted)")
+            continue
+        if role in member.roles:
+            continue  # already has it, nothing to do
+        if role.managed or role >= bot_top_role:
+            skipped.append(f"{role.name} (can't assign)")
+            continue
+        to_add.append(role)
+
+    if not to_add and not skipped:
+        await interaction.response.send_message(
+            f"❌ {member.display_name} already has every recorded role back.",
+            ephemeral=True
+        )
+        stripped.pop(str(member.id), None)
+        await bot.data_manager.save("stripped_roles.json", stripped)
+        return
+
+    if to_add:
+        try:
+            await member.add_roles(*to_add, reason=f"role restore by {interaction.user}")
+        except (discord.Forbidden, discord.HTTPException) as e:
+            await interaction.response.send_message(f"❌ failed: {e}", ephemeral=True)
+            return
+
+    stripped.pop(str(member.id), None)
+    await bot.data_manager.save("stripped_roles.json", stripped)
+
+    parts = []
+    if to_add:
+        parts.append(f"✅ restored {len(to_add)} role(s) to {member.mention}: " + ", ".join(r.name for r in to_add))
+    if skipped:
+        parts.append(f"⚪ skipped: {', '.join(skipped)}")
+
+    await interaction.response.send_message("\n".join(parts))
+    await bot.logging_service.log_action(
+        interaction.guild,
+        f"↩️ **{interaction.user.mention}** restored roles to **{member.mention}**: "
+        + (", ".join(r.name for r in to_add) if to_add else "(none — all skipped)"),
+        discord.Color.blurple()
+    )
+
 @bot.tree.command(name="daily", description="Claim your once-a-day XP bonus")
 @app_commands.guild_only()
 async def daily(interaction: discord.Interaction):
@@ -1763,7 +1902,7 @@ async def help_command(interaction: discord.Interaction):
     """Show help menu"""
     commands_by_category = {
         "🎮 XP & Levels": ["/daily", "/rank", "/stats", "/achievements", "/leaderboard", "/doublexp"],
-        "🔨 Moderation": ["/fakeban", "/lockdown", "/unlock", "/move", "/mass-move"],
+        "🔨 Moderation": ["/fakeban", "/lockdown", "/unlock", "/move", "/mass-move", "/strip-roles", "/restore-roles"],
         "📝 Utility": ["/say", "/edit", "/help", "/voice-xp-logging"]
     }
     
