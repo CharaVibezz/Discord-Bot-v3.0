@@ -78,7 +78,7 @@ class Config:
     QUALITY_BONUS_LINK = 3           # contains a link
     QUALITY_BONUS_REPLY = 2          # is a reply
 
-    DAILY_BONUS_XP = 20
+    DAILY_BONUS_XP = 200
 
     # Voice XP — tiered rate, resets every join/leave (same behavior as the old
     # ramp model). a short-hop farmer just keeps re-collecting the top tier, so
