@@ -1109,16 +1109,42 @@ async def on_voice_state_update(
 @app_commands.describe(member="The member to fake ban")
 @app_commands.guild_only()
 async def fakeban(interaction: discord.Interaction, member: discord.Member):
-    """Fake ban command with animation"""
+    """Fake ban command with animation.
+
+    member.timeout() is a real API call, and Discord enforces role hierarchy
+    on it same as every other moderation action: a bot cannot time out a
+    member whose top role is at or above the bot's own top role, and can
+    never time out the guild owner. That's a platform restriction, not
+    something fixable from this side — if fakeban needs to reach a
+    moderator, the bot's role has to sit above that moderator's role in
+    Server Settings > Roles. What IS fixable in code is checking for that
+    up front instead of quietly eating the 403 and telling the channel it
+    worked anyway.
+    """
     # Permission check
     if not bot.permission_service.can_use_fakeban(interaction.user):
         await interaction.response.send_message("❌ You cannot use this command.", ephemeral=True)
         return
-    
+
     if bot.permission_service.is_admin(member):
         await interaction.response.send_message("❌ You cannot fakeban an administrator.", ephemeral=True)
         return
-    
+
+    if member.id == interaction.guild.owner_id:
+        await interaction.response.send_message("❌ You cannot fakeban the server owner.", ephemeral=True)
+        return
+
+    bot_top_role = interaction.guild.me.top_role
+    if member.top_role >= bot_top_role:
+        await interaction.response.send_message(
+            f"❌ Cannot fakeban {member.mention} — their top role (**{member.top_role.name}**) "
+            f"is at or above my top role (**{bot_top_role.name}**). Discord won't let a bot "
+            f"time out a member ranked at or above it, no matter what this command does. "
+            f"Move my role higher in Server Settings > Roles to fix it.",
+            ephemeral=True
+        )
+        return
+
     # Animation
     await interaction.response.send_message(f"🔨 Preparing ban for {member.mention}...")
     for i in range(5, 0, -1):
@@ -1126,26 +1152,36 @@ async def fakeban(interaction: discord.Interaction, member: discord.Member):
             content=f"🔨 Preparing ban for {member.mention}\nExecuting in **{i}**..."
         )
         await asyncio.sleep(1)
-    
+
     # DM the user
     try:
         await member.send("You've been BANNED!! 🤯🪦 (joke)")
     except (discord.Forbidden, discord.HTTPException) as e:
         logger.debug(f"Could not DM {member}: {e}")
-    
+
     # Timeout
+    timed_out = False
     try:
         await member.timeout(timedelta(seconds=10), reason="Fake ban prank")
+        timed_out = True
     except (discord.Forbidden, discord.HTTPException) as e:
         logger.warning(f"Failed to timeout {member}: {e}")
-    
-    # Final message
-    await interaction.edit_original_response(
-        content=f"🔨 {member.mention} has been banned.\nReason: Breaking the rules."
-    )
+
+    # Final message — only claim success if the timeout actually landed
+    if timed_out:
+        await interaction.edit_original_response(
+            content=f"🔨 {member.mention} has been banned.\nReason: Breaking the rules."
+        )
+    else:
+        await interaction.edit_original_response(
+            content=f"🔨 {member.mention} has been banned.\nReason: Breaking the rules.\n"
+            f"-# (the timeout itself failed — Discord rejected it, see logs)"
+        )
+
     await bot.logging_service.log_action(
         interaction.guild,
         f"🔨 **{interaction.user.mention}** fakebanned **{member.mention}**"
+        + ("" if timed_out else " *(timeout failed — role hierarchy)*")
     )
 
 @bot.tree.command(name="lockdown", description="Prevent members from joining a voice channel")
